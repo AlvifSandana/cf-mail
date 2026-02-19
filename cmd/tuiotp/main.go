@@ -142,6 +142,7 @@ func main() {
 	p := tea.NewProgram(ui.NewModelWithConfig(ui.ModelConfig{
 		AliasManager: tuiApp.AliasService(),
 		OTPManager:   tuiApp,
+		RulesManager: tuiApp.AliasService(),
 		Clipboard:    clip,
 		Health: ui.HealthStatus{
 			Cloudflare:  "ready",
@@ -150,7 +151,7 @@ func main() {
 			Parser:      "ready",
 		},
 		ParentCtx: runCtx,
-	}))
+	}), tea.WithAltScreen())
 	go func() {
 		<-runCtx.Done()
 		p.Quit()
@@ -374,20 +375,21 @@ func (connectorWatchClient) Idle(context.Context, func() error) error {
 	return imap.ErrIdleUnsupported
 }
 
-func (c connectorWatchClient) Poll(ctx context.Context) error {
+func (c connectorWatchClient) Poll(ctx context.Context) ([]imap.IncomingEmail, error) {
 	if c.connector == nil {
-		return fmt.Errorf("imap connector watch client connector is nil")
+		return nil, fmt.Errorf("imap connector watch client connector is nil")
 	}
 
-	if err := c.connector.Poll(ctx); err != nil {
-		return err
+	incoming, err := c.connector.PollUpdates(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	if ctx == nil {
-		return nil
+		return incoming, nil
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return incoming, nil
 }

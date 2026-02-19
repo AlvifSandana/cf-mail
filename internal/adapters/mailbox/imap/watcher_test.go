@@ -32,12 +32,12 @@ func (f *fakeWatchClient) Idle(ctx context.Context, onUpdate func() error) error
 	return ctx.Err()
 }
 
-func (f *fakeWatchClient) Poll(context.Context) error {
+func (f *fakeWatchClient) Poll(context.Context) ([]IncomingEmail, error) {
 	f.pollCalls++
 	if f.pollErr != nil {
-		return f.pollErr
+		return nil, f.pollErr
 	}
-	return nil
+	return nil, nil
 }
 
 func TestNewWatcher_DefaultPollInterval(t *testing.T) {

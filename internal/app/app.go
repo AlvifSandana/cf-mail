@@ -43,8 +43,9 @@ func NewWithContext(ctx context.Context, cfg *config.Config) (*App, error) {
 	}
 
 	cfClient, err := cloudflare.NewClient(cloudflare.ClientConfig{
-		APIToken: cfg.Cloudflare.APIToken,
-		ZoneID:   cfg.Cloudflare.ZoneID,
+		APIToken:  cfg.Cloudflare.APIToken,
+		AccountID: cfg.Cloudflare.AccountID,
+		ZoneID:    cfg.Cloudflare.ZoneID,
 	})
 	if err != nil {
 		_ = db.Close()

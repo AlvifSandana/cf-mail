@@ -72,6 +72,7 @@ func baseValidConfig() *Config {
 		Cloudflare: CloudflareConfig{
 			APITokenEnv: "CF_API_TOKEN",
 			APIToken:    "token",
+			AccountID:   "account",
 			ZoneID:      "zone",
 			Domain:      "example.com",
 		},
@@ -120,6 +121,20 @@ func TestValidate_RejectsInsecureOrInvalidValues(t *testing.T) {
 			},
 		},
 		{
+			name: "missing account id when require verified true",
+			mutate: func(c *Config) {
+				c.Cloudflare.AccountID = ""
+				c.Destination.RequireVerified = true
+			},
+		},
+		{
+			name: "whitespace account id when require verified true",
+			mutate: func(c *Config) {
+				c.Cloudflare.AccountID = "   "
+				c.Destination.RequireVerified = true
+			},
+		},
+		{
 			name: "imap tls disabled",
 			mutate: func(c *Config) {
 				c.Mailbox.IMAP.TLS = false
@@ -153,5 +168,15 @@ func TestValidate_RejectsInsecureOrInvalidValues(t *testing.T) {
 				t.Fatalf("expected validation error")
 			}
 		})
+	}
+}
+
+func TestValidate_AllowsMissingAccountIDWhenDestinationVerificationDisabled(t *testing.T) {
+	cfg := baseValidConfig()
+	cfg.Cloudflare.AccountID = ""
+	cfg.Destination.RequireVerified = false
+
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate() unexpected error when require_verified=false: %v", err)
 	}
 }

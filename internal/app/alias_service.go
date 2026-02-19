@@ -195,6 +195,58 @@ func (s *AliasService) DeleteAlias(ctx context.Context, aliasEmail string) error
 	return nil
 }
 
+// ListRoutingRules fetches all CF routing rules (paginated) with optional name prefix filter.
+func (s *AliasService) ListRoutingRules(ctx context.Context) ([]ports.RoutingRule, error) {
+	if s == nil {
+		return nil, domain.WrapValidation("alias service is nil", nil)
+	}
+
+	rules, err := s.cf.ListRoutingRules(ctx, ports.ListRoutingRulesFilter{})
+	if err != nil {
+		return nil, domain.WrapDependency("list routing rules", err)
+	}
+
+	return rules, nil
+}
+
+// UpdateRoutingRule performs a full-replacement PUT on a CF routing rule.
+func (s *AliasService) UpdateRoutingRule(ctx context.Context, in ports.UpdateRoutingRuleInput) (ports.RoutingRule, error) {
+	if s == nil {
+		return ports.RoutingRule{}, domain.WrapValidation("alias service is nil", nil)
+	}
+
+	in.ID = strings.TrimSpace(in.ID)
+	if in.ID == "" {
+		return ports.RoutingRule{}, domain.WrapValidation("rule id is required", nil)
+	}
+
+	rule, err := s.cf.UpdateRoutingRule(ctx, in)
+	if err != nil {
+		return ports.RoutingRule{}, domain.WrapDependency("update routing rule", err)
+	}
+
+	return rule, nil
+}
+
+// DeleteRoutingRuleByID deletes a CF routing rule by its CF rule ID directly,
+// without requiring the rule to exist in the local database.
+func (s *AliasService) DeleteRoutingRuleByID(ctx context.Context, ruleID string) error {
+	if s == nil {
+		return domain.WrapValidation("alias service is nil", nil)
+	}
+
+	ruleID = strings.TrimSpace(ruleID)
+	if ruleID == "" {
+		return domain.WrapValidation("rule id is required", nil)
+	}
+
+	if err := s.cf.DeleteRoutingRule(ctx, ruleID); err != nil {
+		return domain.WrapDependency("delete routing rule by id", err)
+	}
+
+	return nil
+}
+
 func normalizeEmail(v string) (string, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {

@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/mail"
+	"net/url"
 	"strings"
+	"time"
 )
 
 var (
@@ -25,9 +27,16 @@ func (c *Client) ListDestinationAddresses(ctx context.Context) ([]DestinationAdd
 	if c == nil {
 		return nil, fmt.Errorf("cloudflare client is nil")
 	}
+	if strings.TrimSpace(c.accountID) == "" {
+		return nil, fmt.Errorf("cloudflare account id is required for destination address operations")
+	}
+	if strings.Contains(c.accountID, "/") {
+		return nil, fmt.Errorf("cloudflare account id is invalid")
+	}
 
 	var resp cloudflareEnvelope[[]cloudflareDestinationAddress]
-	if err := c.DoJSON(ctx, http.MethodGet, "/zones/"+c.zoneID+"/email/routing/addresses", nil, nil, &resp); err != nil {
+	escapedAccountID := url.PathEscape(c.accountID)
+	if err := c.DoJSON(ctx, http.MethodGet, "/accounts/"+escapedAccountID+"/email/routing/addresses", nil, nil, &resp); err != nil {
 		return nil, err
 	}
 	if !resp.Success {
@@ -105,11 +114,19 @@ func parseVerified(raw json.RawMessage) bool {
 
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		s = strings.ToLower(strings.TrimSpace(s))
-		switch s {
+		normalized := strings.TrimSpace(s)
+		switch strings.ToLower(normalized) {
 		case "true", "verified", "active", "enabled", "ok":
 			return true
+		case "", "false", "pending", "unverified", "disabled", "0", "null":
+			return false
 		default:
+			if _, err := time.Parse(time.RFC3339Nano, normalized); err == nil {
+				return true
+			}
+			if _, err := time.Parse(time.RFC3339, normalized); err == nil {
+				return true
+			}
 			return false
 		}
 	}

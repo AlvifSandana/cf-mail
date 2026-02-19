@@ -22,7 +22,7 @@ type WatchUpdate struct {
 
 type WatchClient interface {
 	Idle(ctx context.Context, onUpdate func() error) error
-	Poll(ctx context.Context) error
+	Poll(ctx context.Context) ([]IncomingEmail, error)
 }
 
 type Watcher struct {
@@ -93,14 +93,21 @@ func (w *Watcher) runPolling(ctx context.Context, onUpdate func(WatchUpdate)) er
 			return nil
 		}
 
-		if err := w.client.Poll(ctx); err != nil {
+		incoming, err := w.client.Poll(ctx)
+		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 				return nil
 			}
 			return fmt.Errorf("poll mailbox: %w", err)
 		}
 
-		onUpdate(WatchUpdate{Mode: "poll", Timestamp: w.nowFn().UTC()})
+		if len(incoming) == 0 {
+			onUpdate(WatchUpdate{Mode: "poll", Timestamp: w.nowFn().UTC()})
+		} else {
+			for _, msg := range incoming {
+				onUpdate(WatchUpdate{Mode: "poll", Timestamp: w.nowFn().UTC(), IncomingEmail: msg})
+			}
+		}
 
 		if err := w.sleepFn(ctx, w.cfg.PollInterval); err != nil {
 			if errors.Is(err, context.Canceled) {

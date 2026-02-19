@@ -20,8 +20,9 @@ const defaultBaseURL = "https://api.cloudflare.com/client/v4"
 const maxResponseBodyBytes int64 = 4 << 20
 
 type ClientConfig struct {
-	APIToken string
-	ZoneID   string
+	APIToken  string
+	AccountID string
+	ZoneID    string
 
 	BaseURL              string
 	AllowedHosts         []string
@@ -34,8 +35,9 @@ type ClientConfig struct {
 }
 
 type Client struct {
-	apiToken string
-	zoneID   string
+	apiToken  string
+	accountID string
+	zoneID    string
 
 	baseURL     string
 	httpClient  *http.Client
@@ -113,8 +115,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 
 	return &Client{
-		apiToken: cfg.APIToken,
-		zoneID:   cfg.ZoneID,
+		apiToken:  cfg.APIToken,
+		accountID: strings.TrimSpace(cfg.AccountID),
+		zoneID:    cfg.ZoneID,
 
 		baseURL:     strings.TrimRight(parsedBaseURL.String(), "/"),
 		httpClient:  &http.Client{Timeout: timeout},
@@ -128,6 +131,10 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 
 func (c *Client) ZoneID() string {
 	return c.zoneID
+}
+
+func (c *Client) AccountID() string {
+	return c.accountID
 }
 
 func (c *Client) DoJSON(ctx context.Context, method, path string, query url.Values, in any, out any) error {

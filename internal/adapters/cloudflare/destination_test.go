@@ -2,6 +2,7 @@ package cloudflare
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +22,7 @@ func newDestinationTestClient(t *testing.T, rawBaseURL string) *Client {
 
 	c, err := NewClient(ClientConfig{
 		APIToken:             "token",
+		AccountID:            "account-123",
 		ZoneID:               "zone-123",
 		BaseURL:              rawBaseURL,
 		AllowedHosts:         []string{u.Hostname()},
@@ -37,7 +39,7 @@ func newDestinationTestClient(t *testing.T, rawBaseURL string) *Client {
 
 func TestClient_IsDestinationVerified(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/zones/zone-123/email/routing/addresses" {
+		if r.URL.Path != "/accounts/account-123/email/routing/addresses" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -135,5 +137,23 @@ func TestNormalizeEmail(t *testing.T) {
 
 	if _, err := normalizeEmail("not-an-email"); err == nil {
 		t.Fatalf("expected normalizeEmail invalid email error")
+	}
+}
+
+func TestParseVerified_TimestampStringIsVerified(t *testing.T) {
+	if !parseVerified(json.RawMessage(`"2025-07-07T03:03:12.898037Z"`)) {
+		t.Fatalf("expected RFC3339 timestamp string to be treated as verified")
+	}
+}
+
+func TestClient_ListDestinationAddresses_RequiresValidAccountID(t *testing.T) {
+	c := &Client{accountID: ""}
+	if _, err := c.ListDestinationAddresses(context.Background()); err == nil {
+		t.Fatalf("expected error when account id is missing")
+	}
+
+	c = &Client{accountID: "acc/123"}
+	if _, err := c.ListDestinationAddresses(context.Background()); err == nil {
+		t.Fatalf("expected error when account id contains slash")
 	}
 }

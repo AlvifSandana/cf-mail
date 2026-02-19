@@ -16,9 +16,25 @@ type CreateRoutingRuleInput struct {
 }
 
 type RoutingRule struct {
-	ID      string
-	Name    string
-	Enabled bool
+	ID          string
+	Name        string
+	Enabled     bool
+	Priority    int
+	AliasEmail  string
+	Destination []string
+}
+
+type ListRoutingRulesFilter struct {
+	NamePrefix string
+}
+
+type UpdateRoutingRuleInput struct {
+	ID          string
+	Name        string
+	AliasEmail  string
+	Destination []string
+	Enabled     bool
+	Priority    int
 }
 
 // AliasCloudflareClient defines Cloudflare operations required by alias usecase.
@@ -26,6 +42,8 @@ type AliasCloudflareClient interface {
 	EnsureDestinationVerified(ctx context.Context, email string, requireVerified bool) error
 	CreateRoutingRule(ctx context.Context, in CreateRoutingRuleInput) (RoutingRule, error)
 	DeleteRoutingRule(ctx context.Context, ruleID string) error
+	ListRoutingRules(ctx context.Context, filter ListRoutingRulesFilter) ([]RoutingRule, error)
+	UpdateRoutingRule(ctx context.Context, in UpdateRoutingRuleInput) (RoutingRule, error)
 }
 
 // AliasRepository defines persistence contract for alias records.

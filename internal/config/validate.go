@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/mail"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -18,10 +19,13 @@ func Validate(cfg *Config) error {
 	if cfg.Cloudflare.APIToken == "" {
 		return fmt.Errorf("cloudflare api token is empty or not set")
 	}
-	if cfg.Cloudflare.ZoneID == "" {
+	if strings.TrimSpace(cfg.Cloudflare.ZoneID) == "" {
 		return fmt.Errorf("cloudflare.zone_id is required")
 	}
-	if cfg.Cloudflare.Domain == "" {
+	if cfg.Destination.RequireVerified && strings.TrimSpace(cfg.Cloudflare.AccountID) == "" {
+		return fmt.Errorf("cloudflare.account_id is required when destination.require_verified=true")
+	}
+	if strings.TrimSpace(cfg.Cloudflare.Domain) == "" {
 		return fmt.Errorf("cloudflare.domain is required")
 	}
 

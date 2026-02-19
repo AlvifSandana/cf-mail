@@ -17,17 +17,25 @@ type fakeCloudflare struct {
 	ensureCalls int
 	createCalls int
 	deleteCalls int
+	listCalls   int
+	updateCalls int
 
 	lastEnsureEmail   string
 	lastEnsureRequire bool
 	lastCreateInput   ports.CreateRoutingRuleInput
 	lastDeleteRuleID  string
+	lastListFilter    ports.ListRoutingRulesFilter
+	lastUpdateInput   ports.UpdateRoutingRuleInput
 
 	ensureErr error
 	createErr error
 	deleteErr error
+	listErr   error
+	updateErr error
 
 	createResult ports.RoutingRule
+	listResult   []ports.RoutingRule
+	updateResult ports.RoutingRule
 }
 
 func (f *fakeCloudflare) EnsureDestinationVerified(_ context.Context, email string, requireVerified bool) error {
@@ -53,6 +61,33 @@ func (f *fakeCloudflare) DeleteRoutingRule(_ context.Context, ruleID string) err
 	f.deleteCalls++
 	f.lastDeleteRuleID = ruleID
 	return f.deleteErr
+}
+
+func (f *fakeCloudflare) ListRoutingRules(_ context.Context, filter ports.ListRoutingRulesFilter) ([]ports.RoutingRule, error) {
+	f.listCalls++
+	f.lastListFilter = filter
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	out := make([]ports.RoutingRule, len(f.listResult))
+	copy(out, f.listResult)
+	return out, nil
+}
+
+func (f *fakeCloudflare) UpdateRoutingRule(_ context.Context, in ports.UpdateRoutingRuleInput) (ports.RoutingRule, error) {
+	f.updateCalls++
+	f.lastUpdateInput = in
+	if f.updateErr != nil {
+		return ports.RoutingRule{}, f.updateErr
+	}
+	if f.updateResult.ID != "" {
+		return f.updateResult, nil
+	}
+	return ports.RoutingRule{
+		ID:      in.ID,
+		Name:    in.Name,
+		Enabled: in.Enabled,
+	}, nil
 }
 
 type fakeAliasRepo struct {
@@ -334,4 +369,169 @@ func TestAliasService_NewAliasService_AliasDomainRequired(t *testing.T) {
 		return
 	}
 	t.Fatalf("expected error for missing alias domain")
+}
+
+func TestAliasService_ListRoutingRules_Success(t *testing.T) {
+	cf := &fakeCloudflare{
+		listResult: []ports.RoutingRule{
+			{ID: "r1", Name: "tuiotp:SHOP:a", Enabled: true, AliasEmail: "a@example.com", Destination: []string{"inbox@example.com"}},
+			{ID: "r2", Name: "tuiotp:BANK:b", Enabled: false, AliasEmail: "b@example.com", Destination: []string{"inbox@example.com"}},
+		},
+	}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(cf, repo, AliasServiceConfig{DestinationEmail: "inbox@example.com", AliasDomain: "example.com"})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	rules, err := svc.ListRoutingRules(context.Background())
+	if err != nil {
+		t.Fatalf("ListRoutingRules() error = %v", err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(rules))
+	}
+	if rules[0].ID != "r1" || rules[1].ID != "r2" {
+		t.Fatalf("unexpected rules: %+v", rules)
+	}
+	if cf.listCalls != 1 {
+		t.Fatalf("expected 1 list call, got %d", cf.listCalls)
+	}
+}
+
+func TestAliasService_ListRoutingRules_Error(t *testing.T) {
+	cf := &fakeCloudflare{listErr: errors.New("api error")}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(cf, repo, AliasServiceConfig{DestinationEmail: "inbox@example.com", AliasDomain: "example.com"})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	_, err = svc.ListRoutingRules(context.Background())
+	if err == nil {
+		t.Fatalf("expected error from ListRoutingRules")
+	}
+	if !strings.Contains(err.Error(), "list routing rules") {
+		t.Fatalf("expected wrapped error, got %v", err)
+	}
+}
+
+func TestAliasService_UpdateRoutingRule_Success(t *testing.T) {
+	cf := &fakeCloudflare{
+		updateResult: ports.RoutingRule{ID: "r1", Name: "test", Enabled: false},
+	}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(cf, repo, AliasServiceConfig{DestinationEmail: "inbox@example.com", AliasDomain: "example.com"})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	rule, err := svc.UpdateRoutingRule(context.Background(), ports.UpdateRoutingRuleInput{
+		ID:          "r1",
+		Name:        "test",
+		AliasEmail:  "a@example.com",
+		Destination: []string{"inbox@example.com"},
+		Enabled:     false,
+	})
+	if err != nil {
+		t.Fatalf("UpdateRoutingRule() error = %v", err)
+	}
+	if rule.ID != "r1" || rule.Enabled != false {
+		t.Fatalf("unexpected update result: %+v", rule)
+	}
+	if cf.updateCalls != 1 {
+		t.Fatalf("expected 1 update call, got %d", cf.updateCalls)
+	}
+}
+
+func TestAliasService_UpdateRoutingRule_MissingIDRejected(t *testing.T) {
+	cf := &fakeCloudflare{}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(cf, repo, AliasServiceConfig{DestinationEmail: "inbox@example.com", AliasDomain: "example.com"})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	_, err = svc.UpdateRoutingRule(context.Background(), ports.UpdateRoutingRuleInput{Name: "test"})
+	if err == nil || !strings.Contains(err.Error(), "rule id is required") {
+		t.Fatalf("expected rule id required error, got %v", err)
+	}
+	if cf.updateCalls != 0 {
+		t.Fatalf("expected no update call, got %d", cf.updateCalls)
+	}
+}
+
+func TestAliasService_UpdateRoutingRule_Error(t *testing.T) {
+	cf := &fakeCloudflare{updateErr: errors.New("update failed")}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(cf, repo, AliasServiceConfig{DestinationEmail: "inbox@example.com", AliasDomain: "example.com"})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	_, err = svc.UpdateRoutingRule(context.Background(), ports.UpdateRoutingRuleInput{ID: "r1", Name: "test"})
+	if err == nil {
+		t.Fatalf("expected error from UpdateRoutingRule")
+	}
+	if !strings.Contains(err.Error(), "update routing rule") {
+		t.Fatalf("expected wrapped error, got %v", err)
+	}
+}
+
+func TestAliasService_DeleteRoutingRuleByID_Success(t *testing.T) {
+	cf := &fakeCloudflare{}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(cf, repo, AliasServiceConfig{DestinationEmail: "inbox@example.com", AliasDomain: "example.com"})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	if err := svc.DeleteRoutingRuleByID(context.Background(), "rule-1"); err != nil {
+		t.Fatalf("DeleteRoutingRuleByID() error = %v", err)
+	}
+	if cf.deleteCalls != 1 || cf.lastDeleteRuleID != "rule-1" {
+		t.Fatalf("unexpected delete calls: %d rule=%q", cf.deleteCalls, cf.lastDeleteRuleID)
+	}
+}
+
+func TestAliasService_DeleteRoutingRuleByID_MissingIDRejected(t *testing.T) {
+	cf := &fakeCloudflare{}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(cf, repo, AliasServiceConfig{DestinationEmail: "inbox@example.com", AliasDomain: "example.com"})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	err = svc.DeleteRoutingRuleByID(context.Background(), "  ")
+	if err == nil || !strings.Contains(err.Error(), "rule id is required") {
+		t.Fatalf("expected rule id required error, got %v", err)
+	}
+	if cf.deleteCalls != 0 {
+		t.Fatalf("expected no delete call, got %d", cf.deleteCalls)
+	}
+}
+
+func TestAliasService_DeleteRoutingRuleByID_Error(t *testing.T) {
+	cf := &fakeCloudflare{deleteErr: errors.New("cf delete error")}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(cf, repo, AliasServiceConfig{DestinationEmail: "inbox@example.com", AliasDomain: "example.com"})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	err = svc.DeleteRoutingRuleByID(context.Background(), "rule-1")
+	if err == nil {
+		t.Fatalf("expected error from DeleteRoutingRuleByID")
+	}
+	if !strings.Contains(err.Error(), "delete routing rule by id") {
+		t.Fatalf("expected wrapped error, got %v", err)
+	}
 }

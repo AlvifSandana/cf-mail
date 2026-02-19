@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"tuiotp/internal/app"
 	"tuiotp/internal/domain"
@@ -20,6 +21,7 @@ const (
 	maxOTPQueryLen         = 120
 	maxAliasPlatformLen    = 32
 	maxAliasEmailLen       = 320
+	sidebarWidth           = 42
 )
 
 type Panel int
@@ -44,9 +46,11 @@ type Model struct {
 
 	aliasManager aliasManager
 	otpManager   otpManager
+	rulesManager rulesManager
 	clipboard    clipboardCopier
 	opParentCtx  context.Context
 	opTimeout    time.Duration
+	cfOpTimeout  time.Duration
 	aliases      []domain.Alias
 	selected     int
 
@@ -56,6 +60,12 @@ type Model struct {
 	createField      int
 
 	deleteConfirm bool
+
+	// CF routing rules management
+	showCFRules     bool
+	cfRules         []ports.RoutingRule
+	cfSelected      int
+	cfDeleteConfirm bool
 
 	otpEvents      []domain.OTPEvent
 	otpSelected    int
@@ -75,15 +85,23 @@ type otpManager interface {
 	ListOTPEvents(ctx context.Context, filter app.OTPListFilter) ([]domain.OTPEvent, error)
 }
 
+type rulesManager interface {
+	ListRoutingRules(ctx context.Context) ([]ports.RoutingRule, error)
+	UpdateRoutingRule(ctx context.Context, in ports.UpdateRoutingRuleInput) (ports.RoutingRule, error)
+	DeleteRoutingRuleByID(ctx context.Context, ruleID string) error
+}
+
 type clipboardCopier = ports.Clipboard
 
 type ModelConfig struct {
 	AliasManager aliasManager
 	OTPManager   otpManager
+	RulesManager rulesManager
 	Clipboard    clipboardCopier
 	Health       HealthStatus
 	ParentCtx    context.Context
 	OpTimeout    time.Duration
+	CFOpTimeout  time.Duration // timeout for CF API operations (paginated); defaults to 30s
 }
 
 type HealthStatus struct {
@@ -101,6 +119,9 @@ func NewModelWithConfig(cfg ModelConfig) Model {
 	if cfg.OpTimeout <= 0 {
 		cfg.OpTimeout = 5 * time.Second
 	}
+	if cfg.CFOpTimeout <= 0 {
+		cfg.CFOpTimeout = 30 * time.Second
+	}
 
 	return Model{
 		ActivePanel:  PanelStatus,
@@ -109,19 +130,24 @@ func NewModelWithConfig(cfg ModelConfig) Model {
 		health:       normalizeHealthStatus(cfg.Health),
 		aliasManager: cfg.AliasManager,
 		otpManager:   cfg.OTPManager,
+		rulesManager: cfg.RulesManager,
 		clipboard:    cfg.Clipboard,
 		opParentCtx:  cfg.ParentCtx,
 		opTimeout:    cfg.OpTimeout,
+		cfOpTimeout:  cfg.CFOpTimeout,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := make([]tea.Cmd, 0, 2)
+	cmds := make([]tea.Cmd, 0, 3)
 	if m.aliasManager != nil {
 		cmds = append(cmds, m.refreshAliasesCmd())
 	}
 	if m.otpManager != nil {
 		cmds = append(cmds, m.refreshOTPHistoryCmd(m.otpSearchQuery))
+	}
+	if m.rulesManager != nil {
+		cmds = append(cmds, m.refreshCFRulesCmd())
 	}
 
 	if len(cmds) == 0 {
@@ -213,6 +239,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.LastAction = "otp copied"
 		return m, nil
 
+	case cfRulesLoadedMsg:
+		if msg.err != nil {
+			m.ErrorMsg = userSafeError("refresh cf rules", msg.err)
+			m.LastAction = "cf rules refresh failed"
+			return m, nil
+		}
+		m.ErrorMsg = ""
+		m.cfRules = msg.rules
+		if len(m.cfRules) == 0 {
+			m.cfSelected = 0
+		} else if m.cfSelected >= len(m.cfRules) {
+			m.cfSelected = len(m.cfRules) - 1
+		}
+		m.LastAction = fmt.Sprintf("cf rules refreshed (%d)", len(m.cfRules))
+		return m, nil
+
+	case cfRuleUpdatedMsg:
+		if msg.err != nil {
+			m.ErrorMsg = userSafeError("toggle cf rule", msg.err)
+			m.LastAction = "toggle cf rule failed"
+			return m, nil
+		}
+		m.ErrorMsg = ""
+		status := "disabled"
+		if msg.rule.Enabled {
+			status = "enabled"
+		}
+		m.LastAction = fmt.Sprintf("cf rule %s", status)
+		return m, m.refreshCFRulesCmd()
+
+	case cfRuleDeletedMsg:
+		if msg.err != nil {
+			m.cfDeleteConfirm = false
+			m.ErrorMsg = userSafeError("delete cf rule", msg.err)
+			m.LastAction = "delete cf rule failed"
+			return m, nil
+		}
+		m.cfDeleteConfirm = false
+		m.ErrorMsg = ""
+		m.LastAction = "cf rule deleted"
+		return m, m.refreshCFRulesCmd()
+
 	case app.RuntimeEvent:
 		switch msg.Type {
 		case app.RuntimeEventWatcherUpdate:
@@ -239,9 +307,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if m.ActivePanel == PanelAliases {
-			updated, cmd, handled := m.updateAliasesPanel(msg)
-			if handled {
-				return updated, cmd
+			if m.showCFRules {
+				updated, cmd, handled := m.updateCFRulesPanel(msg)
+				if handled {
+					return updated, cmd
+				}
+			} else {
+				updated, cmd, handled := m.updateAliasesPanel(msg)
+				if handled {
+					return updated, cmd
+				}
 			}
 		}
 		if m.ActivePanel == PanelLatestOTP {
@@ -273,49 +348,653 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// theme holds all colors and styles used across the TUI.
+type theme struct {
+	// palette
+	bg      lipgloss.Color
+	bgAlt   lipgloss.Color
+	fg      lipgloss.Color
+	muted   lipgloss.Color
+	accent  lipgloss.Color
+	success lipgloss.Color
+	warning lipgloss.Color
+	danger  lipgloss.Color
+	purple  lipgloss.Color
+
+	// derived styles
+	base         lipgloss.Style
+	bold         lipgloss.Style
+	mutedStyle   lipgloss.Style
+	accentStyle  lipgloss.Style
+	successStyle lipgloss.Style
+	warnStyle    lipgloss.Style
+	errStyle     lipgloss.Style
+	purpleStyle  lipgloss.Style
+}
+
+func newTheme() theme {
+	t := theme{
+		bg:      lipgloss.Color("234"),
+		bgAlt:   lipgloss.Color("236"),
+		fg:      lipgloss.Color("253"),
+		muted:   lipgloss.Color("242"),
+		accent:  lipgloss.Color("39"),
+		success: lipgloss.Color("78"),
+		warning: lipgloss.Color("214"),
+		danger:  lipgloss.Color("204"),
+		purple:  lipgloss.Color("135"),
+	}
+
+	t.base = lipgloss.NewStyle().Foreground(t.fg)
+	t.bold = lipgloss.NewStyle().Bold(true).Foreground(t.fg)
+	t.mutedStyle = lipgloss.NewStyle().Foreground(t.muted)
+	t.accentStyle = lipgloss.NewStyle().Bold(true).Foreground(t.accent)
+	t.successStyle = lipgloss.NewStyle().Bold(true).Foreground(t.success)
+	t.warnStyle = lipgloss.NewStyle().Bold(true).Foreground(t.warning)
+	t.errStyle = lipgloss.NewStyle().Bold(true).Foreground(t.danger)
+	t.purpleStyle = lipgloss.NewStyle().Foreground(t.purple)
+
+	return t
+}
+
 func (m Model) View() string {
-	panels := []string{"Status", "Aliases", "Latest OTP", "Logs"}
-	for i := range panels {
-		if m.ActivePanel == Panel(i) {
-			panels[i] = "[" + panels[i] + "]"
+	th := newTheme()
+
+	// Full-screen root — no extra padding, we control every pixel
+	root := lipgloss.NewStyle().
+		Background(th.bg).
+		Foreground(th.fg)
+
+	totalH := m.Height
+	if totalH <= 0 {
+		totalH = 24
+	}
+	totalW := m.Width
+	if totalW <= 0 {
+		totalW = 100
+	}
+
+	// ── Top bar (header + tab bar) ────────────────────────────────────────
+	topBar := m.renderTopBar(th, totalW)
+	footer := m.renderFooter(th, totalW)
+
+	topBarH := lipgloss.Height(topBar)
+	footerH := lipgloss.Height(footer)
+
+	// When help overlay is shown, pre-render it so we can subtract its
+	// height from the body budget — prevents overflow in AltScreen.
+	var helpBlock string
+	helpH := 0
+	if m.ShowHelp {
+		helpBlock = m.renderHelp(th)
+		helpH = lipgloss.Height(helpBlock)
+	}
+
+	// Reserve rows: topBar + footer + help (if open)
+	bodyH := totalH - topBarH - footerH - helpH
+	if bodyH < 4 {
+		bodyH = 4
+	}
+
+	// ── Sidebar (right): Health + Aliases ────────────────────────────────
+	sbW := sidebarWidth
+	mainW := totalW - sbW - 1 // 1 col for border separator
+	if mainW < 20 {
+		// Narrow terminal: shrink sidebar to give main content room
+		sbW = totalW - 20 - 1
+		if sbW < 20 {
+			sbW = 20
+		}
+		mainW = totalW - sbW - 1
+		if mainW < 10 {
+			mainW = 10
 		}
 	}
 
-	header := "TUIOTP Dashboard (Skeleton)"
-	state := fmt.Sprintf("Panel: %s | Last action: %s", panelLabel(m.ActivePanel), m.LastAction)
-	keyHints := "Global: q quit | ? help | r refresh | tab switch panel"
+	sidebar := m.renderSidebar(th, sbW, bodyH)
 
-	body := strings.Join([]string{
-		header,
-		state,
-		m.errorLine(),
-		"",
-		"Panels: " + strings.Join(panels, " | "),
-		"",
-		m.healthLine(),
-		"Aliases:",
-		m.aliasPanelView(),
-		"Latest OTP:",
-		m.otpPanelView(),
-		"Logs: (coming soon)",
-		"",
-		keyHints,
-	}, "\n")
+	// ── Main content (left): OTP + Logs ─────────────────────────────────
+	mainContent := m.renderMainContent(th, mainW, bodyH)
 
-	if !m.ShowHelp {
-		return body
+	// ── Body row ─────────────────────────────────────────────────────────
+	body := lipgloss.JoinHorizontal(lipgloss.Top, mainContent, sidebar)
+
+	// ── Assemble final output ────────────────────────────────────────────
+	parts := []string{topBar, body}
+	if m.ShowHelp {
+		parts = append(parts, helpBlock)
+	}
+	parts = append(parts, footer)
+
+	rendered := root.Render(strings.Join(parts, "\n"))
+
+	// Clamp output to terminal height — lipgloss Height() is a minimum,
+	// not a maximum, so inner content can exceed the card Height.
+	// Truncating here guarantees AltScreen never overflows.
+	lines := strings.Split(rendered, "\n")
+	if len(lines) > totalH {
+		lines = lines[:totalH]
+		rendered = strings.Join(lines, "\n")
 	}
 
-	help := strings.Join([]string{
-		"",
-		"Help:",
-		"- q: quit",
-		"- ?: toggle help",
-		"- r: refresh",
-		"- tab: switch active panel",
+	return rendered
+}
+
+// ── Top bar: logo + clock + tab bar ──────────────────────────────────────────
+
+func (m Model) renderTopBar(th theme, totalW int) string {
+	// Logo (single line, compact)
+	logo := th.accentStyle.Render("⚡ TUIOTP") +
+		th.mutedStyle.Render("  OTP Dashboard · Cloudflare Email · IMAP")
+
+	now := time.Now().UTC().Format("15:04:05 UTC")
+	clock := lipgloss.NewStyle().
+		Foreground(th.accent).
+		Render(now)
+
+	// Push clock to right
+	logoW := lipgloss.Width(logo)
+	clockW := lipgloss.Width(clock)
+	gap := totalW - logoW - clockW - 2
+	if gap < 1 {
+		gap = 1
+	}
+	topLine := lipgloss.NewStyle().
+		Background(th.bgAlt).
+		Width(totalW).
+		Render(logo + strings.Repeat(" ", gap) + clock)
+
+	// Tab bar (only OTP and Logs — health & aliases are in sidebar)
+	tabBar := m.renderTabBar(th, totalW)
+
+	return strings.Join([]string{topLine, tabBar}, "\n")
+}
+
+func (m Model) renderTabBar(th theme, totalW int) string {
+	type tabDef struct {
+		panel Panel
+		label string
+		icon  string
+	}
+	tabs := []tabDef{
+		{PanelLatestOTP, "OTP", "⚡"},
+		{PanelLogs, "Logs", "≡"},
+		{PanelAliases, "Aliases", "⊞"},
+		{PanelStatus, "Health", "◈"},
+	}
+
+	activeTabSt := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(th.bg).
+		Background(th.accent).
+		Padding(0, 2)
+
+	inactiveTabSt := lipgloss.NewStyle().
+		Foreground(th.muted).
+		Background(lipgloss.Color("235")).
+		Padding(0, 2)
+
+	sepSt := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("237")).
+		Background(lipgloss.Color("235"))
+
+	parts := make([]string, 0, len(tabs)*2)
+	for i, t := range tabs {
+		if i > 0 {
+			parts = append(parts, sepSt.Render("│"))
+		}
+		label := t.icon + " " + t.label
+		if m.ActivePanel == t.panel {
+			parts = append(parts, activeTabSt.Render(label))
+		} else {
+			parts = append(parts, inactiveTabSt.Render(label))
+		}
+	}
+
+	tabRow := strings.Join(parts, "")
+	tabW := lipgloss.Width(tabRow)
+	pad := ""
+	if totalW > tabW {
+		pad = lipgloss.NewStyle().
+			Background(lipgloss.Color("235")).
+			Render(strings.Repeat(" ", totalW-tabW))
+	}
+
+	return tabRow + pad
+}
+
+// ── Sidebar (right): Health card stacked on Aliases card ─────────────────────
+
+func (m Model) renderSidebar(th theme, w, totalH int) string {
+	innerW := w - 2 // account for left border char + gap
+
+	// Health card (fixed height ~9, includes its own border)
+	healthCard := m.renderHealthCard(th, innerW)
+	healthH := lipgloss.Height(healthCard)
+
+	// Aliases card takes remaining height.
+	// aliasCard uses RoundedBorder (+2 rows outside content Height),
+	// so we subtract 2 to keep the total sidebar within totalH.
+	const aliasBorderRows = 2
+	aliasContentH := totalH - healthH - aliasBorderRows
+	if aliasContentH < 4 {
+		aliasContentH = 4
+	}
+	aliasCard := m.renderAliasCard(th, innerW, aliasContentH)
+
+	sidebar := lipgloss.JoinVertical(lipgloss.Left, healthCard, aliasCard)
+
+	// Left border line to visually separate from main content
+	borderSt := lipgloss.NewStyle().
+		Border(lipgloss.Border{Left: "│"}, false, false, false, true).
+		BorderForeground(lipgloss.Color("237")).
+		PaddingLeft(0)
+
+	return borderSt.Render(sidebar)
+}
+
+func (m Model) renderHealthCard(th theme, w int) string {
+	health := normalizeHealthStatus(m.health)
+
+	titleSt := lipgloss.NewStyle().
+		Bold(true).Foreground(th.fg).
+		Background(th.bgAlt).
+		Width(w).
+		Padding(0, 1)
+	title := titleSt.Render("◈ System Health")
+
+	type pill struct{ name, val string }
+	pills := []pill{
+		{"☁  cloudflare", health.Cloudflare},
+		{"📬 destination", health.Destination},
+		{"📥 mailbox", health.Mailbox},
+		{"⚙  parser", health.Parser},
+	}
+
+	rows := make([]string, 0, len(pills))
+	for _, p := range pills {
+		dot, label := m.healthDotLabel(p.val, th)
+		nameStr := th.mutedStyle.Render(fmt.Sprintf("  %-15s", p.name))
+		rows = append(rows, nameStr+dot+" "+label)
+	}
+
+	// Feedback / last-action line
+	feedback := " " + m.feedbackBanner(th)
+
+	cardSt := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("238")).
+		Width(w)
+
+	if m.ActivePanel == PanelStatus {
+		cardSt = cardSt.BorderForeground(th.accent)
+	}
+
+	inner := strings.Join(append([]string{title, ""}, append(rows, "", feedback)...), "\n")
+	return cardSt.Render(inner)
+}
+
+// healthDotLabel returns a colored dot + status text for a health value.
+func (m Model) healthDotLabel(v string, th theme) (dot string, label string) {
+	v = strings.ToLower(strings.TrimSpace(v))
+	switch {
+	case strings.Contains(v, "error") || strings.Contains(v, "failed"):
+		return th.errStyle.Render("●"), th.errStyle.Render(v)
+	case v == "unknown" || strings.Contains(v, "reconnect"):
+		return th.warnStyle.Render("●"), th.warnStyle.Render(v)
+	default:
+		return th.successStyle.Render("●"), th.successStyle.Copy().Bold(false).Render(v)
+	}
+}
+
+func (m Model) renderAliasCard(th theme, w, h int) string {
+	titleSt := lipgloss.NewStyle().
+		Bold(true).Foreground(th.fg).
+		Background(th.bgAlt).
+		Width(w).
+		Padding(0, 1)
+
+	var title, body, hint string
+
+	if m.showCFRules {
+		title = titleSt.Render("☁  CF Rules  " + th.mutedStyle.Render("live"))
+		body = m.cfRulesPanelView(w)
+		hint = th.mutedStyle.Render("  s back  e toggle  d del  r refresh  ↑↓ nav")
+	} else {
+		title = titleSt.Render("⊞ Aliases")
+		body = m.aliasPanelView(w)
+		hint = th.mutedStyle.Render("  n new  d del  s cf rules  ↑↓ nav")
+	}
+
+	cardSt := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("238")).
+		Width(w).
+		Height(h)
+
+	if m.ActivePanel == PanelAliases {
+		cardSt = cardSt.BorderForeground(th.accent)
+	}
+
+	sep := th.mutedStyle.Render(strings.Repeat("─", w-2))
+
+	inner := strings.Join([]string{title, sep, "", body, "", hint}, "\n")
+	inner = clampLines(inner, h)
+	return cardSt.Render(inner)
+}
+
+// ── Main content (left): OTP panel on top, Logs below ────────────────────────
+
+func (m Model) renderMainContent(th theme, w, totalH int) string {
+	// Each card has RoundedBorder which adds 2 rows (top+bottom) outside
+	// the content Height. We have 2 cards, so 4 border rows total.
+	const borderRows = 2 // per card
+	contentH := totalH - borderRows*2
+	if contentH < 6 {
+		contentH = 6
+	}
+
+	// Split content area: OTP gets ~65%, Logs ~35%
+	otpH := contentH * 65 / 100
+	logsH := contentH - otpH
+	if logsH < 3 {
+		logsH = 3
+		otpH = contentH - logsH
+	}
+
+	otpCard := m.renderOTPCard(th, w, otpH)
+	logsCard := m.renderLogsCard(th, w, logsH)
+
+	return lipgloss.JoinVertical(lipgloss.Left, otpCard, logsCard)
+}
+
+func (m Model) renderOTPCard(th theme, w, h int) string {
+	titleSt := lipgloss.NewStyle().
+		Bold(true).Foreground(th.fg).
+		Background(th.bgAlt).
+		Width(w-2).
+		Padding(0, 1)
+	title := titleSt.Render("⚡ Latest OTP  " + th.mutedStyle.Render("incoming timeline"))
+
+	sep := th.mutedStyle.Render(strings.Repeat("─", w-4))
+
+	timeline := m.otpTimelineView(w - 4)
+	detailSep := th.mutedStyle.Render(strings.Repeat("─", w-4))
+	detailTitle := th.purpleStyle.Copy().Bold(true).Render("◈ Selected Detail")
+	detail := m.otpDetailView()
+
+	cardSt := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("238")).
+		Width(w).
+		Height(h)
+
+	if m.ActivePanel == PanelLatestOTP {
+		cardSt = cardSt.BorderForeground(th.accent)
+	}
+
+	inner := strings.Join([]string{
+		title, sep, "",
+		timeline,
+		"", detailSep, detailTitle,
+		detail,
 	}, "\n")
 
-	return body + help
+	// Clamp inner content to the allotted height so the card
+	// doesn't overflow (lipgloss Height is a minimum, not a max).
+	inner = clampLines(inner, h)
+
+	return cardSt.Render(inner)
+}
+
+func (m Model) renderLogsCard(th theme, w, h int) string {
+	titleSt := lipgloss.NewStyle().
+		Bold(true).Foreground(th.fg).
+		Background(th.bgAlt).
+		Width(w-2).
+		Padding(0, 1)
+	title := titleSt.Render("≡ Logs  " + th.mutedStyle.Render("runtime log stream"))
+
+	sep := th.mutedStyle.Render(strings.Repeat("─", w-4))
+
+	placeholder := lipgloss.NewStyle().
+		Foreground(th.muted).
+		Italic(true).
+		Render("  coming soon — logs will stream here")
+
+	cardSt := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("238")).
+		Width(w).
+		Height(h)
+
+	if m.ActivePanel == PanelLogs {
+		cardSt = cardSt.BorderForeground(th.accent)
+	}
+
+	inner := strings.Join([]string{title, sep, "", placeholder}, "\n")
+	return cardSt.Render(inner)
+}
+
+// ── Footer ────────────────────────────────────────────────────────────────────
+
+func (m Model) renderFooter(th theme, totalW int) string {
+	type key struct{ k, desc string }
+	keys := []key{
+		{"q", "quit"},
+		{"?", "help"},
+		{"r", "refresh"},
+		{"tab", "panel"},
+		{"o", "otp"},
+		{"/", "search"},
+		{"c", "copy"},
+		{"s", "cf rules"},
+	}
+
+	kSt := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(th.bg).
+		Background(th.muted).
+		Padding(0, 1)
+	dSt := th.mutedStyle
+
+	parts := make([]string, 0, len(keys))
+	for _, kv := range keys {
+		parts = append(parts, kSt.Render(kv.k)+" "+dSt.Render(kv.desc))
+	}
+
+	inner := strings.Join(parts, "  ")
+	return lipgloss.NewStyle().
+		Background(th.bgAlt).
+		Padding(0, 1).
+		Width(totalW).
+		Render(inner)
+}
+
+// ── Help overlay ──────────────────────────────────────────────────────────────
+
+func (m Model) renderHelp(th theme) string {
+	helpSt := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(th.purple).
+		Padding(1, 3)
+
+	kSt := th.accentStyle
+	dSt := th.mutedStyle
+
+	col := func(k, d string) string {
+		return kSt.Render(fmt.Sprintf("%-14s", k)) + dSt.Render(d)
+	}
+
+	rows := []string{
+		th.bold.Render("Keyboard Shortcuts"),
+		"",
+		col("q / ctrl+c", "quit application"),
+		col("?", "toggle this help"),
+		col("r", "refresh all data"),
+		col("tab", "cycle panels"),
+		col("o", "jump to OTP panel"),
+		col("/", "search OTP events"),
+		col("c", "copy selected OTP"),
+		col("n", "create alias (aliases panel)"),
+		col("d", "delete alias / cf rule"),
+		col("s", "toggle cf rules view"),
+		col("e", "toggle cf rule enable/disable"),
+		col("↑↓ / j k", "navigate items"),
+		col("esc", "cancel / clear filter / back"),
+	}
+
+	return helpSt.Render(strings.Join(rows, "\n"))
+}
+
+// otpTimelineView renders the OTP event timeline table within the given width.
+func (m Model) otpTimelineView(w int) string {
+	th := newTheme()
+
+	// Column widths that adapt to available w
+	// cursor(3) + num(3) + plat(12) + otp(8) + alias(?) + time(8) + gaps(~10)
+	aliasW := w - 3 - 3 - 12 - 8 - 8 - 10
+	if aliasW < 10 {
+		aliasW = 10
+	}
+	sepW := w - 2
+	if sepW < 10 {
+		sepW = 10
+	}
+
+	if m.otpSearchMode {
+		searchBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(th.accent).
+			Padding(0, 1).
+			Render(fmt.Sprintf("🔍 %s▌", m.otpSearchInput))
+		return strings.Join([]string{
+			searchBox,
+			th.mutedStyle.Render("  enter apply  ·  esc cancel  ·  backspace edit"),
+		}, "\n")
+	}
+
+	if len(m.otpEvents) == 0 {
+		empty := lipgloss.NewStyle().
+			Foreground(th.muted).
+			Italic(true).
+			Render("  no OTP events found")
+		if m.otpSearchQuery != "" {
+			return strings.Join([]string{
+				empty,
+				th.mutedStyle.Render(fmt.Sprintf("  filter: %q", m.otpSearchQuery)),
+			}, "\n")
+		}
+		return empty
+	}
+
+	hdrSt := lipgloss.NewStyle().Bold(true).Foreground(th.muted)
+	header := hdrSt.Render(fmt.Sprintf("   %-3s  %-12s  %-8s  %-*s  %s",
+		"#", "PLATFORM", "OTP", aliasW, "ALIAS", "TIME",
+	))
+	sep := th.mutedStyle.Render("  " + strings.Repeat("─", sepW))
+
+	lines := make([]string, 0, len(m.otpEvents)+4)
+	if m.otpSearchQuery != "" {
+		lines = append(lines, th.warnStyle.Render(fmt.Sprintf("  filter: %q", m.otpSearchQuery)))
+	}
+	lines = append(lines, header, sep)
+
+	for i, evt := range m.otpEvents {
+		numSt := th.mutedStyle
+		platSt := th.accentStyle.Copy().Bold(false)
+		otpSt := lipgloss.NewStyle().Bold(true).Foreground(th.success)
+		aliasSt := th.mutedStyle
+		timeSt := th.purpleStyle
+		cursor := "   "
+
+		if i == m.otpSelected {
+			cursor = th.accentStyle.Render(" ▶ ")
+			otpSt = lipgloss.NewStyle().Bold(true).Foreground(th.warning)
+		}
+
+		line := fmt.Sprintf("%s%s  %s  %s  %s  %s",
+			cursor,
+			numSt.Render(fmt.Sprintf("%-3d", i+1)),
+			platSt.Render(truncate(evt.Platform, 12)),
+			otpSt.Render(fmt.Sprintf("%-8s", evt.OTPCode)),
+			aliasSt.Render(truncate(fmt.Sprintf("%-*s", aliasW, evt.AliasEmail), aliasW)),
+			timeSt.Render(evt.ReceivedAt.UTC().Format("15:04:05")),
+		)
+		lines = append(lines, line)
+	}
+
+	lines = append(lines, sep)
+	lines = append(lines, th.mutedStyle.Render("  ↑↓/jk nav  ·  c copy  ·  / search  ·  esc clear"))
+
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) otpDetailView() string {
+	th := newTheme()
+
+	if len(m.otpEvents) == 0 {
+		return lipgloss.NewStyle().Foreground(th.muted).Italic(true).Render("  no OTP selected")
+	}
+
+	idx := m.otpSelected
+	if idx < 0 || idx >= len(m.otpEvents) {
+		idx = 0
+	}
+	e := m.otpEvents[idx]
+
+	labelStyle := th.mutedStyle
+	valueStyle := lipgloss.NewStyle().Foreground(th.fg)
+	otpBig := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(th.warning).
+		Background(lipgloss.Color("236")).
+		Padding(0, 2).
+		Render(e.OTPCode)
+
+	rows := []string{
+		lipgloss.JoinHorizontal(lipgloss.Center,
+			labelStyle.Render("  OTP Code   "),
+			otpBig,
+		),
+		"",
+		labelStyle.Render("  platform  ") + valueStyle.Render(e.Platform),
+		labelStyle.Render("  alias     ") + valueStyle.Render(e.AliasEmail),
+		labelStyle.Render("  from      ") + valueStyle.Render(e.FromEmail),
+		labelStyle.Render("  received  ") + th.purpleStyle.Render(e.ReceivedAt.UTC().Format(time.RFC3339)),
+		"",
+		th.mutedStyle.Render("  press ") +
+			th.accentStyle.Render("c") +
+			th.mutedStyle.Render(" to copy OTP to clipboard"),
+	}
+
+	return strings.Join(rows, "\n")
+}
+
+// feedbackBanner renders the last-action / error feedback row.
+func (m Model) feedbackBanner(th theme) string {
+	if strings.TrimSpace(m.ErrorMsg) != "" {
+		return th.errStyle.
+			Copy().
+			Background(lipgloss.Color("52")).
+			Padding(0, 1).
+			Render("✖  " + m.ErrorMsg)
+	}
+	action := strings.TrimSpace(m.LastAction)
+	if action == "" {
+		action = "ready"
+	}
+	if strings.Contains(strings.ToLower(action), "refresh") || strings.Contains(strings.ToLower(action), "loading") {
+		return th.warnStyle.Render("↻  " + action)
+	}
+	if strings.Contains(strings.ToLower(action), "copied") {
+		return th.successStyle.
+			Copy().
+			Background(lipgloss.Color("22")).
+			Padding(0, 1).
+			Render("✔  " + action)
+	}
+	return th.successStyle.Render("✔  " + action)
 }
 
 func panelLabel(p Panel) string {
@@ -357,6 +1036,20 @@ type otpCopiedMsg struct {
 	err error
 }
 
+type cfRulesLoadedMsg struct {
+	rules []ports.RoutingRule
+	err   error
+}
+
+type cfRuleUpdatedMsg struct {
+	rule ports.RoutingRule
+	err  error
+}
+
+type cfRuleDeletedMsg struct {
+	err error
+}
+
 func (m Model) refreshAliasesCmd() tea.Cmd {
 	if m.aliasManager == nil {
 		return nil
@@ -380,7 +1073,7 @@ func (m Model) createAliasCmd(platform, aliasEmail string) tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.opContext(), m.opTimeout)
+		ctx, cancel := context.WithTimeout(m.opContext(), m.cfOpTimeout)
 		defer cancel()
 
 		_, err := m.aliasManager.CreateAlias(ctx, app.CreateAliasInput{
@@ -397,7 +1090,7 @@ func (m Model) deleteAliasCmd(aliasEmail string) tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.opContext(), m.opTimeout)
+		ctx, cancel := context.WithTimeout(m.opContext(), m.cfOpTimeout)
 		defer cancel()
 
 		err := m.aliasManager.DeleteAlias(ctx, strings.TrimSpace(aliasEmail))
@@ -421,6 +1114,61 @@ func (m Model) copyOTPCmd(otpCode string) tea.Cmd {
 
 		err := m.clipboard.Copy(ctx, otpCode)
 		return otpCopiedMsg{err: err}
+	}
+}
+
+func (m Model) refreshCFRulesCmd() tea.Cmd {
+	if m.rulesManager == nil {
+		return nil
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.opContext(), m.cfOpTimeout)
+		defer cancel()
+
+		rules, err := m.rulesManager.ListRoutingRules(ctx)
+		if err != nil {
+			return cfRulesLoadedMsg{err: err}
+		}
+		return cfRulesLoadedMsg{rules: rules}
+	}
+}
+
+func (m Model) toggleCFRuleCmd(rule ports.RoutingRule) tea.Cmd {
+	if m.rulesManager == nil {
+		return nil
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.opContext(), m.cfOpTimeout)
+		defer cancel()
+
+		updated, err := m.rulesManager.UpdateRoutingRule(ctx, ports.UpdateRoutingRuleInput{
+			ID:          rule.ID,
+			Name:        rule.Name,
+			AliasEmail:  rule.AliasEmail,
+			Destination: rule.Destination,
+			Enabled:     !rule.Enabled,
+			Priority:    rule.Priority,
+		})
+		if err != nil {
+			return cfRuleUpdatedMsg{err: err}
+		}
+		return cfRuleUpdatedMsg{rule: updated}
+	}
+}
+
+func (m Model) deleteCFRuleCmd(ruleID string) tea.Cmd {
+	if m.rulesManager == nil {
+		return nil
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.opContext(), m.cfOpTimeout)
+		defer cancel()
+
+		err := m.rulesManager.DeleteRoutingRuleByID(ctx, strings.TrimSpace(ruleID))
+		return cfRuleDeletedMsg{err: err}
 	}
 }
 
@@ -451,11 +1199,14 @@ func (m Model) nextRefreshAllCmd() (Model, tea.Cmd) {
 	reqAt := time.Now().UTC()
 	m.otpLastReqAt = reqAt
 
-	cmds := make([]tea.Cmd, 0, 2)
+	cmds := make([]tea.Cmd, 0, 3)
 	if cmd := m.refreshAliasesCmd(); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
 	if cmd := m.refreshOTPHistoryCmdAt(m.otpSearchQuery, reqAt); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	if cmd := m.refreshCFRulesCmd(); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
 
@@ -559,6 +1310,15 @@ func (m Model) updateAliasesPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		m.ErrorMsg = ""
 		m.LastAction = "create alias form"
 		return m, nil, true
+	case "s":
+		if m.rulesManager == nil {
+			m.ErrorMsg = "rules manager unavailable"
+			return m, nil, true
+		}
+		m.showCFRules = true
+		m.ErrorMsg = ""
+		m.LastAction = "cf rules view"
+		return m, m.refreshCFRulesCmd(), true
 	case "d":
 		if len(m.aliases) == 0 {
 			m.LastAction = "no alias to delete"
@@ -586,43 +1346,256 @@ func (m Model) updateAliasesPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	return m, nil, false
 }
 
-func (m Model) aliasPanelView() string {
+func (m Model) aliasPanelView(w int) string {
+	th := newTheme()
+
+	// Usable inner width (account for card border + padding)
+	inner := w - 4
+	if inner < 10 {
+		inner = 10
+	}
+
+	// ── Create form ──────────────────────────────────────────────────────────
 	if m.creating {
-		platformPrefix := " "
-		emailPrefix := " "
+		activeFieldSt := lipgloss.NewStyle().
+			Bold(true).Foreground(th.accent).
+			Border(lipgloss.NormalBorder(), false, false, true, false).
+			BorderForeground(th.accent).
+			Width(inner - 14)
+		inactiveFieldSt := lipgloss.NewStyle().
+			Foreground(th.fg).
+			Border(lipgloss.NormalBorder(), false, false, true, false).
+			BorderForeground(th.muted).
+			Width(inner - 14)
+
+		platLabel := th.mutedStyle.Render("  platform  ")
+		emailLabel := th.mutedStyle.Render("  email     ")
+		platValue := m.createPlatform + "▌"
+		emailValue := m.createAliasEmail + "▌"
+
+		var platField, emailField string
 		if m.createField == 0 {
-			platformPrefix = ">"
+			platField = activeFieldSt.Render(platValue)
+			emailField = inactiveFieldSt.Render(emailValue)
 		} else {
-			emailPrefix = ">"
+			platField = inactiveFieldSt.Render(platValue)
+			emailField = activeFieldSt.Render(emailValue)
 		}
+
+		hint := th.mutedStyle.Render("  enter  tab  esc")
+
 		return strings.Join([]string{
-			"  [create mode]",
-			fmt.Sprintf("  %s platform: %s", platformPrefix, m.createPlatform),
-			fmt.Sprintf("  %s alias email: %s", emailPrefix, m.createAliasEmail),
-			"  enter submit | tab switch field | esc cancel",
+			th.accentStyle.Render("  ✚ New Alias"),
+			"",
+			platLabel + platField,
+			emailLabel + emailField,
+			"",
+			hint,
 		}, "\n")
 	}
 
+	// ── Delete confirm ───────────────────────────────────────────────────────
 	if m.deleteConfirm {
 		alias := ""
 		if len(m.aliases) > 0 && m.selected >= 0 && m.selected < len(m.aliases) {
-			alias = m.aliases[m.selected].AliasEmail
+			alias = truncate(m.aliases[m.selected].AliasEmail, inner-2)
 		}
-		return fmt.Sprintf("  [delete confirm] %s (y/enter confirm, n/esc cancel)", alias)
+		return strings.Join([]string{
+			th.errStyle.Render("  ⚠  Delete?"),
+			"",
+			"  " + lipgloss.NewStyle().Foreground(th.fg).Render(alias),
+			"",
+			th.successStyle.Render("  y") + th.mutedStyle.Render(" confirm  ") +
+				th.errStyle.Render("n") + th.mutedStyle.Render(" cancel"),
+		}, "\n")
 	}
 
+	// ── Empty state ──────────────────────────────────────────────────────────
 	if len(m.aliases) == 0 {
-		return "  (no aliases) | n create"
+		return lipgloss.NewStyle().
+			Foreground(th.muted).
+			Italic(true).
+			Render("  no aliases  ·  press n")
 	}
 
-	lines := make([]string, 0, len(m.aliases)+1)
-	lines = append(lines, "  n create | d delete | ↑/↓ select")
+	// ── Alias list (compact for narrow sidebar) ───────────────────────────────
+	lines := make([]string, 0, len(m.aliases)*2+1)
+
 	for i, row := range m.aliases {
-		prefix := " "
+		cursor := "  "
+		platSt := th.accentStyle.Copy().Bold(false)
+		emailSt := lipgloss.NewStyle().Foreground(th.muted)
+
 		if i == m.selected {
-			prefix = ">"
+			cursor = th.accentStyle.Render("▶ ")
+			platSt = th.accentStyle
+			emailSt = lipgloss.NewStyle().Foreground(th.fg)
 		}
-		lines = append(lines, fmt.Sprintf("  %s %s | %s | %s", prefix, row.Platform, row.AliasEmail, row.RuleID))
+
+		dot := th.successStyle.Render("●")
+		if !row.Enabled {
+			dot = th.mutedStyle.Render("○")
+		}
+
+		platW := inner / 2
+		emailW := inner - platW - 4
+		if emailW < 8 {
+			emailW = 8
+		}
+
+		line := cursor + dot + " " +
+			platSt.Render(truncate(row.Platform, platW)) + "  " +
+			emailSt.Render(truncate(row.AliasEmail, emailW))
+		lines = append(lines, line)
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) updateCFRulesPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
+	key := msg.String()
+	if key == "ctrl+c" {
+		return m, tea.Quit, true
+	}
+
+	if m.cfDeleteConfirm {
+		switch key {
+		case "y", "enter":
+			if len(m.cfRules) == 0 || m.cfSelected < 0 || m.cfSelected >= len(m.cfRules) {
+				m.cfDeleteConfirm = false
+				m.ErrorMsg = "invalid cf rule selection"
+				m.LastAction = "delete cf rule failed"
+				return m, nil, true
+			}
+			rule := m.cfRules[m.cfSelected]
+			m.LastAction = "deleting cf rule..."
+			return m, m.deleteCFRuleCmd(rule.ID), true
+		case "n", "esc":
+			m.cfDeleteConfirm = false
+			m.LastAction = "delete cf rule cancelled"
+			return m, nil, true
+		default:
+			return m, nil, true
+		}
+	}
+
+	switch key {
+	case "s", "esc":
+		m.showCFRules = false
+		m.ErrorMsg = ""
+		m.LastAction = "aliases view"
+		return m, nil, true
+	case "e":
+		if len(m.cfRules) == 0 {
+			m.LastAction = "no cf rule to toggle"
+			return m, nil, true
+		}
+		if m.rulesManager == nil {
+			m.ErrorMsg = "rules manager unavailable"
+			return m, nil, true
+		}
+		idx := m.cfSelected
+		if idx < 0 || idx >= len(m.cfRules) {
+			return m, nil, true
+		}
+		rule := m.cfRules[idx]
+		status := "disabling"
+		if !rule.Enabled {
+			status = "enabling"
+		}
+		m.LastAction = fmt.Sprintf("%s cf rule...", status)
+		return m, m.toggleCFRuleCmd(rule), true
+	case "d":
+		if len(m.cfRules) == 0 {
+			m.LastAction = "no cf rule to delete"
+			return m, nil, true
+		}
+		if m.rulesManager == nil {
+			m.ErrorMsg = "rules manager unavailable"
+			return m, nil, true
+		}
+		m.cfDeleteConfirm = true
+		m.LastAction = "confirm delete cf rule"
+		return m, nil, true
+	case "r":
+		m.LastAction = "refreshing cf rules..."
+		return m, m.refreshCFRulesCmd(), true
+	case "up", "k":
+		if len(m.cfRules) > 0 && m.cfSelected > 0 {
+			m.cfSelected--
+		}
+		return m, nil, true
+	case "down", "j":
+		if len(m.cfRules) > 0 && m.cfSelected < len(m.cfRules)-1 {
+			m.cfSelected++
+		}
+		return m, nil, true
+	}
+
+	return m, nil, false
+}
+
+func (m Model) cfRulesPanelView(w int) string {
+	th := newTheme()
+
+	inner := w - 4
+	if inner < 10 {
+		inner = 10
+	}
+
+	// ── Delete confirm ───────────────────────────────────────────────────────
+	if m.cfDeleteConfirm {
+		ruleLabel := ""
+		if len(m.cfRules) > 0 && m.cfSelected >= 0 && m.cfSelected < len(m.cfRules) {
+			rule := m.cfRules[m.cfSelected]
+			ruleLabel = truncate(rule.AliasEmail, inner-2)
+			if ruleLabel == "" {
+				ruleLabel = truncate(rule.Name, inner-2)
+			}
+		}
+		return strings.Join([]string{
+			th.errStyle.Render("  ⚠  Delete CF Rule?"),
+			"",
+			"  " + lipgloss.NewStyle().Foreground(th.fg).Render(ruleLabel),
+			"",
+			th.successStyle.Render("  y") + th.mutedStyle.Render(" confirm  ") +
+				th.errStyle.Render("n") + th.mutedStyle.Render(" cancel"),
+		}, "\n")
+	}
+
+	// ── Empty state ──────────────────────────────────────────────────────────
+	if len(m.cfRules) == 0 {
+		return lipgloss.NewStyle().
+			Foreground(th.muted).
+			Italic(true).
+			Render("  no cf routing rules found")
+	}
+
+	// ── CF Rules list ────────────────────────────────────────────────────────
+	lines := make([]string, 0, len(m.cfRules)+1)
+
+	for i, rule := range m.cfRules {
+		cursor := "  "
+		emailSt := lipgloss.NewStyle().Foreground(th.muted)
+
+		if i == m.cfSelected {
+			cursor = th.accentStyle.Render("▶ ")
+			emailSt = lipgloss.NewStyle().Foreground(th.fg)
+		}
+
+		dot := th.successStyle.Render("●")
+		if !rule.Enabled {
+			dot = th.mutedStyle.Render("○")
+		}
+
+		label := rule.AliasEmail
+		if label == "" {
+			label = rule.Name
+		}
+
+		line := cursor + dot + " " +
+			emailSt.Render(truncate(label, inner-4))
+		lines = append(lines, line)
 	}
 
 	return strings.Join(lines, "\n")
@@ -709,54 +1682,39 @@ func (m Model) updateOTPPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	return m, nil, false
 }
 
-func (m Model) otpPanelView() string {
-	if m.otpSearchMode {
-		return strings.Join([]string{
-			fmt.Sprintf("  [search] query: %s", m.otpSearchInput),
-			"  enter apply | esc cancel | backspace edit",
-		}, "\n")
-	}
-
-	if len(m.otpEvents) == 0 {
-		if m.otpSearchQuery != "" {
-			return fmt.Sprintf("  (no otp events) | filter=%q | / search | esc clear", m.otpSearchQuery)
-		}
-		return "  (no otp events) | / search"
-	}
-
-	latest := m.otpEvents[0]
-	header := fmt.Sprintf("  latest: %s | %s | %s | %s", latest.Platform, latest.OTPCode, latest.ReceivedAt.UTC().Format(time.RFC3339), latest.AliasEmail)
-	if m.otpSearchQuery != "" {
-		header += fmt.Sprintf(" | filter=%q", m.otpSearchQuery)
-	}
-
-	lines := make([]string, 0, len(m.otpEvents)+2)
-	lines = append(lines, header)
-	lines = append(lines, "  / search | esc clear filter | ↑/↓ select | c copy")
-	for i, evt := range m.otpEvents {
-		prefix := " "
-		if i == m.otpSelected {
-			prefix = ">"
-		}
-		lines = append(lines, fmt.Sprintf("  %s %s | %s | %s | %s", prefix, evt.Platform, evt.OTPCode, evt.AliasEmail, evt.ReceivedAt.UTC().Format(time.RFC3339)))
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-func (m Model) errorLine() string {
-	if strings.TrimSpace(m.ErrorMsg) == "" {
-		return ""
-	}
-	return "Error: " + m.ErrorMsg
-}
-
 func (m Model) opContext() context.Context {
 	if m.opParentCtx != nil {
 		return m.opParentCtx
 	}
 
 	return context.Background()
+}
+
+// truncate clips a string to maxW runes, appending "…" if it was cut.
+func truncate(s string, maxW int) string {
+	if maxW <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= maxW {
+		return s
+	}
+	if maxW <= 1 {
+		return "…"
+	}
+	return string(r[:maxW-1]) + "…"
+}
+
+// clampLines truncates s to at most maxLines lines.
+func clampLines(s string, maxLines int) string {
+	if maxLines <= 0 {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= maxLines {
+		return s
+	}
+	return strings.Join(lines[:maxLines], "\n")
 }
 
 func trimLastRune(v string) string {
@@ -814,15 +1772,4 @@ func sanitizeMailboxMode(mode string) string {
 	default:
 		return "unknown"
 	}
-}
-
-func (m Model) healthLine() string {
-	h := normalizeHealthStatus(m.health)
-	return fmt.Sprintf(
-		"Status: cloudflare=%s destination=%s mailbox=%s parser=%s",
-		h.Cloudflare,
-		h.Destination,
-		h.Mailbox,
-		h.Parser,
-	)
 }

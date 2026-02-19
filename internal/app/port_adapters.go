@@ -39,6 +39,62 @@ func (a aliasCloudflareAdapter) DeleteRoutingRule(ctx context.Context, ruleID st
 	return a.client.DeleteRoutingRule(ctx, ruleID)
 }
 
+func (a aliasCloudflareAdapter) ListRoutingRules(ctx context.Context, filter ports.ListRoutingRulesFilter) ([]ports.RoutingRule, error) {
+	rules, err := a.client.ListRoutingRules(ctx, cloudflare.ListRulesFilter{
+		NamePrefix: filter.NamePrefix,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]ports.RoutingRule, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, mapCloudflareRuleToPort(r))
+	}
+	return out, nil
+}
+
+func (a aliasCloudflareAdapter) UpdateRoutingRule(ctx context.Context, in ports.UpdateRoutingRuleInput) (ports.RoutingRule, error) {
+	r, err := a.client.UpdateRoutingRule(ctx, cloudflare.UpdateRuleInput{
+		ID:          in.ID,
+		Name:        in.Name,
+		AliasEmail:  in.AliasEmail,
+		Destination: in.Destination,
+		Enabled:     in.Enabled,
+		Priority:    in.Priority,
+	})
+	if err != nil {
+		return ports.RoutingRule{}, err
+	}
+	return mapCloudflareRuleToPort(r), nil
+}
+
+// mapCloudflareRuleToPort extracts AliasEmail from matchers and Destination from actions.
+func mapCloudflareRuleToPort(r cloudflare.RoutingRule) ports.RoutingRule {
+	pr := ports.RoutingRule{
+		ID:       r.ID,
+		Name:     r.Name,
+		Enabled:  r.Enabled,
+		Priority: r.Priority,
+	}
+
+	for _, m := range r.Matchers {
+		if m.Type == "literal" && m.Field == "to" && m.Value != "" {
+			pr.AliasEmail = m.Value
+			break
+		}
+	}
+
+	for _, a := range r.Actions {
+		if a.Type == "forward" && len(a.Value) > 0 {
+			pr.Destination = a.Value
+			break
+		}
+	}
+
+	return pr
+}
+
 type aliasRepositoryAdapter struct {
 	repo *sqlite.AliasRepository
 }
