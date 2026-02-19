@@ -1,0 +1,148 @@
+app:
+  timezone: "Asia/Jakarta"
+  db_path: "./tuiotp.db"
+  log_path: "./tuiotp.log"
+
+cloudflare:
+  # Nama environment variable yang menyimpan Cloudflare API Token.
+  api_token_env: "CF_API_TOKEN"
+  account_id: "your_account_id"
+  zone_id: "your_zone_id"
+  domain: "example.com"
+  rule_name_prefix: "tuiotp"
+  default_priority: 0
+  enabled_by_default: true
+
+destination:
+  email: "destination-inbox@gmail.com"
+  require_verified: true
+
+mailbox:
+  mode: "imap"
+  imap:
+    host: "imap.gmail.com"
+    port: 993
+    tls: true
+    username: "destination-inbox@gmail.com"
+    # Nama environment variable yang menyimpan IMAP app password.
+    password_env: "IMAP_APP_PASSWORD"
+    mailbox: "INBOX"
+    idle: true
+    poll_interval: "5s"
+    fetch_body: "text"
+
+otp:
+  output_format: "{{.Platform}} | {{.OTP}} | {{.ReceivedAt}} | {{.Alias}}"
+  dedupe_window: "2m"
+  rules:
+    # ── Google ────────────────────────────────────────────────────────────
+    - platform: "GOOGLE"
+      from_contains: ["accounts.google.com", "google.com"]
+      subject_regex: "(?i)verification|code|sign.?in|security"
+      otp_regex: "\\b(\\d{6})\\b"
+
+    # ── GitHub ────────────────────────────────────────────────────────────
+    - platform: "GITHUB"
+      from_contains: ["github.com"]
+      subject_regex: "(?i)verification|code|sign.?in|device"
+      otp_regex: "\\b(\\d{6,8})\\b"
+
+    # ── OpenAI ────────────────────────────────────────────────────────────
+    - platform: "OPENAI"
+      from_contains: ["no-reply", "openai"]
+      subject_regex: "(?i)code|otp|verification"
+      otp_regex: "\\b(\\d{6})\\b"
+
+    # ── Microsoft ─────────────────────────────────────────────────────────
+    - platform: "MICROSOFT"
+      from_contains: ["microsoft.com", "live.com", "outlook.com"]
+      subject_regex: "(?i)security|code|verification|sign.?in"
+      otp_regex: "\\b(\\d{6,8})\\b"
+
+    # ── Twitter / X ───────────────────────────────────────────────────────
+    - platform: "TWITTER"
+      from_contains: ["twitter.com", "x.com"]
+      subject_regex: "(?i)verification|code|confirm|login"
+      otp_regex: "\\b(\\d{6,8})\\b"
+
+    # ── Instagram ─────────────────────────────────────────────────────────
+    - platform: "INSTAGRAM"
+      from_contains: ["instagram.com", "mail.instagram.com"]
+      subject_regex: "(?i)code|verification|confirm|login"
+      otp_regex: "\\b(\\d{6})\\b"
+
+    # ── Facebook / Meta ───────────────────────────────────────────────────
+    - platform: "FACEBOOK"
+      from_contains: ["facebookmail.com", "facebook.com", "meta.com"]
+      subject_regex: "(?i)code|confirmation|verification|login"
+      otp_regex: "\\b(\\d{6,8})\\b"
+
+    # ── WhatsApp ──────────────────────────────────────────────────────────
+    - platform: "WHATSAPP"
+      from_contains: ["whatsapp.com"]
+      subject_regex: "(?i)code|registration|verification"
+      otp_regex: "\\b(\\d{6})\\b"
+
+    # ── Telegram ──────────────────────────────────────────────────────────
+    - platform: "TELEGRAM"
+      from_contains: ["telegram.org"]
+      subject_regex: "(?i)code|login|verification"
+      otp_regex: "\\b(\\d{5,6})\\b"
+
+    # ── Discord ───────────────────────────────────────────────────────────
+    - platform: "DISCORD"
+      from_contains: ["discord.com"]
+      subject_regex: "(?i)verification|code|verify|login"
+      otp_regex: "\\b(\\d{6})\\b"
+
+    # ── Amazon ────────────────────────────────────────────────────────────
+    - platform: "AMAZON"
+      from_contains: ["amazon.com", "amazon.co.id"]
+      subject_regex: "(?i)verification|code|otp|sign.?in"
+      otp_regex: "\\b(\\d{6})\\b"
+
+    # ── Shopee ────────────────────────────────────────────────────────────
+    - platform: "SHOPEE"
+      from_contains: ["shopee.co.id", "shopee.com"]
+      subject_regex: "(?i)verifikasi|kode|code|otp"
+      otp_regex: "\\b(\\d{6})\\b"
+
+    # ── Tokopedia ─────────────────────────────────────────────────────────
+    - platform: "TOKOPEDIA"
+      from_contains: ["tokopedia.com"]
+      subject_regex: "(?i)verifikasi|kode|code|otp"
+      otp_regex: "\\b(\\d{6})\\b"
+
+    # ── Grab ──────────────────────────────────────────────────────────────
+    - platform: "GRAB"
+      from_contains: ["grab.com"]
+      subject_regex: "(?i)verification|code|otp"
+      otp_regex: "\\b(\\d{6})\\b"
+
+    # ── Gojek ─────────────────────────────────────────────────────────────
+    - platform: "GOJEK"
+      from_contains: ["gojek.com", "gopay.co.id"]
+      subject_regex: "(?i)verifikasi|kode|code|otp"
+      otp_regex: "\\b(\\d{6})\\b"
+
+    # ── Binance ───────────────────────────────────────────────────────────
+    - platform: "BINANCE"
+      from_contains: ["binance.com"]
+      subject_regex: "(?i)verification|code|security|withdrawal"
+      otp_regex: "\\b(\\d{6})\\b"
+
+    # ── Coinbase ──────────────────────────────────────────────────────────
+    - platform: "COINBASE"
+      from_contains: ["coinbase.com"]
+      subject_regex: "(?i)verification|code|sign.?in"
+      otp_regex: "\\b(\\d{6,8})\\b"
+
+    # ── Catch-all (harus terakhir) ────────────────────────────────────────
+    - platform: "CUSTOM"
+      subject_regex: ".*"
+      otp_regex: "\\b(\\d{4,8})\\b"
+
+ui:
+  clipboard:
+    enabled: true
+    method: "auto"

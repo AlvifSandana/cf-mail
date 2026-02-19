@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -19,7 +20,6 @@ import (
 const (
 	defaultOTPHistoryLimit = 50
 	maxOTPQueryLen         = 120
-	maxAliasPlatformLen    = 32
 	maxAliasEmailLen       = 320
 	sidebarWidth           = 42
 )
@@ -28,7 +28,7 @@ type Panel int
 
 const (
 	PanelStatus Panel = iota
-	PanelAliases
+	PanelMailAccount
 	PanelLatestOTP
 	PanelLogs
 	panelCount
@@ -44,28 +44,20 @@ type Model struct {
 	ErrorMsg   string
 	health     HealthStatus
 
-	aliasManager aliasManager
 	otpManager   otpManager
 	rulesManager rulesManager
 	clipboard    clipboardCopier
 	opParentCtx  context.Context
 	opTimeout    time.Duration
 	cfOpTimeout  time.Duration
-	aliases      []domain.Alias
-	selected     int
 
-	creating         bool
-	createPlatform   string
-	createAliasEmail string
-	createField      int
-
-	deleteConfirm bool
-
-	// CF routing rules management
-	showCFRules     bool
+	// Mail Account (CF routing rules) management
 	cfRules         []ports.RoutingRule
 	cfSelected      int
 	cfDeleteConfirm bool
+
+	creating         bool
+	createAliasEmail string
 
 	otpEvents      []domain.OTPEvent
 	otpSelected    int
@@ -73,12 +65,13 @@ type Model struct {
 	otpSearchInput string
 	otpSearchQuery string
 	otpLastReqAt   time.Time
-}
 
-type aliasManager interface {
-	ListAliases(ctx context.Context) ([]domain.Alias, error)
-	CreateAlias(ctx context.Context, in app.CreateAliasInput) (domain.Alias, error)
-	DeleteAlias(ctx context.Context, aliasEmail string) error
+	// Logs panel
+	logBuffer     logBufferReader
+	logLines      []string
+	logSeq        uint64
+	logScroll     int  // lines scrolled up from bottom (0 = bottom)
+	logAutoScroll bool // true = auto-follow new lines
 }
 
 type otpManager interface {
@@ -87,17 +80,26 @@ type otpManager interface {
 
 type rulesManager interface {
 	ListRoutingRules(ctx context.Context) ([]ports.RoutingRule, error)
+	CreateRoutingRuleDirect(ctx context.Context, in ports.CreateRoutingRuleInput) (ports.RoutingRule, error)
 	UpdateRoutingRule(ctx context.Context, in ports.UpdateRoutingRuleInput) (ports.RoutingRule, error)
 	DeleteRoutingRuleByID(ctx context.Context, ruleID string) error
 }
 
 type clipboardCopier = ports.Clipboard
 
+// logBufferReader is the interface used by the TUI to poll log lines
+// from the ring buffer. Decoupled from concrete *observability.RingBuffer
+// for testability.
+type logBufferReader interface {
+	Lines() []string
+	Seq() uint64
+}
+
 type ModelConfig struct {
-	AliasManager aliasManager
 	OTPManager   otpManager
 	RulesManager rulesManager
 	Clipboard    clipboardCopier
+	LogBuffer    logBufferReader
 	Health       HealthStatus
 	ParentCtx    context.Context
 	OpTimeout    time.Duration
@@ -124,30 +126,31 @@ func NewModelWithConfig(cfg ModelConfig) Model {
 	}
 
 	return Model{
-		ActivePanel:  PanelStatus,
-		ShowHelp:     false,
-		LastAction:   "ready",
-		health:       normalizeHealthStatus(cfg.Health),
-		aliasManager: cfg.AliasManager,
-		otpManager:   cfg.OTPManager,
-		rulesManager: cfg.RulesManager,
-		clipboard:    cfg.Clipboard,
-		opParentCtx:  cfg.ParentCtx,
-		opTimeout:    cfg.OpTimeout,
-		cfOpTimeout:  cfg.CFOpTimeout,
+		ActivePanel:   PanelStatus,
+		ShowHelp:      false,
+		LastAction:    "ready",
+		health:        normalizeHealthStatus(cfg.Health),
+		otpManager:    cfg.OTPManager,
+		rulesManager:  cfg.RulesManager,
+		clipboard:     cfg.Clipboard,
+		opParentCtx:   cfg.ParentCtx,
+		opTimeout:     cfg.OpTimeout,
+		cfOpTimeout:   cfg.CFOpTimeout,
+		logBuffer:     cfg.LogBuffer,
+		logAutoScroll: true,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
 	cmds := make([]tea.Cmd, 0, 3)
-	if m.aliasManager != nil {
-		cmds = append(cmds, m.refreshAliasesCmd())
-	}
 	if m.otpManager != nil {
 		cmds = append(cmds, m.refreshOTPHistoryCmd(m.otpSearchQuery))
 	}
 	if m.rulesManager != nil {
 		cmds = append(cmds, m.refreshCFRulesCmd())
+	}
+	if m.logBuffer != nil {
+		cmds = append(cmds, m.logTickCmd())
 	}
 
 	if len(cmds) == 0 {
@@ -162,51 +165,6 @@ func (m Model) Init() tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case aliasesLoadedMsg:
-		if msg.err != nil {
-			m.ErrorMsg = userSafeError("refresh aliases", msg.err)
-			m.LastAction = "refresh failed"
-			return m, nil
-		}
-
-		m.ErrorMsg = ""
-		m.aliases = msg.aliases
-		if len(m.aliases) == 0 {
-			m.selected = 0
-		} else if m.selected >= len(m.aliases) {
-			m.selected = len(m.aliases) - 1
-		}
-		m.LastAction = fmt.Sprintf("aliases refreshed (%d)", len(m.aliases))
-		return m, nil
-
-	case aliasCreatedMsg:
-		if msg.err != nil {
-			m.ErrorMsg = userSafeError("create alias", msg.err)
-			m.LastAction = "create alias failed"
-			return m, nil
-		}
-
-		m.creating = false
-		m.createField = 0
-		m.createPlatform = ""
-		m.createAliasEmail = ""
-		m.ErrorMsg = ""
-		m.LastAction = "alias created"
-		return m, m.refreshAliasesCmd()
-
-	case aliasDeletedMsg:
-		if msg.err != nil {
-			m.deleteConfirm = false
-			m.ErrorMsg = userSafeError("delete alias", msg.err)
-			m.LastAction = "delete alias failed"
-			return m, nil
-		}
-
-		m.deleteConfirm = false
-		m.ErrorMsg = ""
-		m.LastAction = "alias deleted"
-		return m, m.refreshAliasesCmd()
-
 	case otpHistoryLoadedMsg:
 		if !m.otpLastReqAt.IsZero() && msg.reqAt.Before(m.otpLastReqAt) {
 			return m, nil
@@ -241,8 +199,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case cfRulesLoadedMsg:
 		if msg.err != nil {
-			m.ErrorMsg = userSafeError("refresh cf rules", msg.err)
-			m.LastAction = "cf rules refresh failed"
+			m.ErrorMsg = userSafeError("refresh mail accounts", msg.err)
+			m.LastAction = "mail accounts refresh failed"
 			return m, nil
 		}
 		m.ErrorMsg = ""
@@ -252,13 +210,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.cfSelected >= len(m.cfRules) {
 			m.cfSelected = len(m.cfRules) - 1
 		}
-		m.LastAction = fmt.Sprintf("cf rules refreshed (%d)", len(m.cfRules))
+		m.LastAction = fmt.Sprintf("mail accounts refreshed (%d)", len(m.cfRules))
 		return m, nil
+
+	case cfRuleCreatedMsg:
+		if msg.err != nil {
+			m.ErrorMsg = userSafeError("create mail account", msg.err)
+			m.LastAction = "create mail account failed"
+			return m, nil
+		}
+
+		m.creating = false
+		m.createAliasEmail = ""
+		m.ErrorMsg = ""
+		m.LastAction = "mail account created"
+		return m, m.refreshCFRulesCmd()
 
 	case cfRuleUpdatedMsg:
 		if msg.err != nil {
-			m.ErrorMsg = userSafeError("toggle cf rule", msg.err)
-			m.LastAction = "toggle cf rule failed"
+			m.ErrorMsg = userSafeError("toggle mail account", msg.err)
+			m.LastAction = "toggle mail account failed"
 			return m, nil
 		}
 		m.ErrorMsg = ""
@@ -266,19 +237,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.rule.Enabled {
 			status = "enabled"
 		}
-		m.LastAction = fmt.Sprintf("cf rule %s", status)
+		m.LastAction = fmt.Sprintf("mail account %s", status)
 		return m, m.refreshCFRulesCmd()
 
 	case cfRuleDeletedMsg:
 		if msg.err != nil {
 			m.cfDeleteConfirm = false
-			m.ErrorMsg = userSafeError("delete cf rule", msg.err)
-			m.LastAction = "delete cf rule failed"
+			m.ErrorMsg = userSafeError("delete mail account", msg.err)
+			m.LastAction = "delete mail account failed"
 			return m, nil
 		}
 		m.cfDeleteConfirm = false
 		m.ErrorMsg = ""
-		m.LastAction = "cf rule deleted"
+		m.LastAction = "mail account deleted"
 		return m, m.refreshCFRulesCmd()
 
 	case app.RuntimeEvent:
@@ -300,23 +271,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case logTickMsg:
+		if m.logBuffer == nil {
+			return m, nil
+		}
+		newSeq := m.logBuffer.Seq()
+		if newSeq != m.logSeq {
+			m.logSeq = newSeq
+			m.logLines = m.logBuffer.Lines()
+			if m.logAutoScroll {
+				m.logScroll = 0
+			}
+		}
+		return m, m.logTickCmd()
+
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
 		m.Height = msg.Height
 		return m, nil
 
 	case tea.KeyMsg:
-		if m.ActivePanel == PanelAliases {
-			if m.showCFRules {
-				updated, cmd, handled := m.updateCFRulesPanel(msg)
-				if handled {
-					return updated, cmd
-				}
-			} else {
-				updated, cmd, handled := m.updateAliasesPanel(msg)
-				if handled {
-					return updated, cmd
-				}
+		if m.ActivePanel == PanelLogs {
+			updated, cmd, handled := m.updateLogsPanel(msg)
+			if handled {
+				return updated, cmd
+			}
+		}
+		if m.ActivePanel == PanelMailAccount {
+			updated, cmd, handled := m.updateMailAccountPanel(msg)
+			if handled {
+				return updated, cmd
 			}
 		}
 		if m.ActivePanel == PanelLatestOTP {
@@ -341,6 +325,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "o":
 			m.ActivePanel = PanelLatestOTP
 			m.LastAction = "otp panel"
+			return m, nil
+		case "l":
+			m.ActivePanel = PanelLogs
+			m.LastAction = "logs panel"
 			return m, nil
 		}
 	}
@@ -436,7 +424,7 @@ func (m Model) View() string {
 		bodyH = 4
 	}
 
-	// ── Sidebar (right): Health + Aliases ────────────────────────────────
+	// ── Sidebar (right): Health + Mail Account ──────────────────────────
 	sbW := sidebarWidth
 	mainW := totalW - sbW - 1 // 1 col for border separator
 	if mainW < 20 {
@@ -504,7 +492,7 @@ func (m Model) renderTopBar(th theme, totalW int) string {
 		Width(totalW).
 		Render(logo + strings.Repeat(" ", gap) + clock)
 
-	// Tab bar (only OTP and Logs — health & aliases are in sidebar)
+	// Tab bar
 	tabBar := m.renderTabBar(th, totalW)
 
 	return strings.Join([]string{topLine, tabBar}, "\n")
@@ -519,7 +507,7 @@ func (m Model) renderTabBar(th theme, totalW int) string {
 	tabs := []tabDef{
 		{PanelLatestOTP, "OTP", "⚡"},
 		{PanelLogs, "Logs", "≡"},
-		{PanelAliases, "Aliases", "⊞"},
+		{PanelMailAccount, "Mail Account", "☁"},
 		{PanelStatus, "Health", "◈"},
 	}
 
@@ -563,7 +551,7 @@ func (m Model) renderTabBar(th theme, totalW int) string {
 	return tabRow + pad
 }
 
-// ── Sidebar (right): Health card stacked on Aliases card ─────────────────────
+// ── Sidebar (right): Health card stacked on Mail Account card ────────────────
 
 func (m Model) renderSidebar(th theme, w, totalH int) string {
 	innerW := w - 2 // account for left border char + gap
@@ -572,17 +560,17 @@ func (m Model) renderSidebar(th theme, w, totalH int) string {
 	healthCard := m.renderHealthCard(th, innerW)
 	healthH := lipgloss.Height(healthCard)
 
-	// Aliases card takes remaining height.
-	// aliasCard uses RoundedBorder (+2 rows outside content Height),
+	// Mail Account card takes remaining height.
+	// Card uses RoundedBorder (+2 rows outside content Height),
 	// so we subtract 2 to keep the total sidebar within totalH.
-	const aliasBorderRows = 2
-	aliasContentH := totalH - healthH - aliasBorderRows
-	if aliasContentH < 4 {
-		aliasContentH = 4
+	const cardBorderRows = 2
+	mailContentH := totalH - healthH - cardBorderRows
+	if mailContentH < 4 {
+		mailContentH = 4
 	}
-	aliasCard := m.renderAliasCard(th, innerW, aliasContentH)
+	mailCard := m.renderMailAccountCard(th, innerW, mailContentH)
 
-	sidebar := lipgloss.JoinVertical(lipgloss.Left, healthCard, aliasCard)
+	sidebar := lipgloss.JoinVertical(lipgloss.Left, healthCard, mailCard)
 
 	// Left border line to visually separate from main content
 	borderSt := lipgloss.NewStyle().
@@ -647,24 +635,16 @@ func (m Model) healthDotLabel(v string, th theme) (dot string, label string) {
 	}
 }
 
-func (m Model) renderAliasCard(th theme, w, h int) string {
+func (m Model) renderMailAccountCard(th theme, w, h int) string {
 	titleSt := lipgloss.NewStyle().
 		Bold(true).Foreground(th.fg).
 		Background(th.bgAlt).
 		Width(w).
 		Padding(0, 1)
 
-	var title, body, hint string
-
-	if m.showCFRules {
-		title = titleSt.Render("☁  CF Rules  " + th.mutedStyle.Render("live"))
-		body = m.cfRulesPanelView(w)
-		hint = th.mutedStyle.Render("  s back  e toggle  d del  r refresh  ↑↓ nav")
-	} else {
-		title = titleSt.Render("⊞ Aliases")
-		body = m.aliasPanelView(w)
-		hint = th.mutedStyle.Render("  n new  d del  s cf rules  ↑↓ nav")
-	}
+	title := titleSt.Render("☁  Mail Account  " + th.mutedStyle.Render("live"))
+	body := m.mailAccountPanelView(w)
+	hint := th.mutedStyle.Render("  n new  e toggle  d del  r refresh  ↑↓ nav")
 
 	cardSt := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -672,7 +652,7 @@ func (m Model) renderAliasCard(th theme, w, h int) string {
 		Width(w).
 		Height(h)
 
-	if m.ActivePanel == PanelAliases {
+	if m.ActivePanel == PanelMailAccount {
 		cardSt = cardSt.BorderForeground(th.accent)
 	}
 
@@ -753,14 +733,14 @@ func (m Model) renderLogsCard(th theme, w, h int) string {
 		Background(th.bgAlt).
 		Width(w-2).
 		Padding(0, 1)
-	title := titleSt.Render("≡ Logs  " + th.mutedStyle.Render("runtime log stream"))
+
+	scrollIndicator := th.mutedStyle.Render("auto ▼")
+	if m.logScroll > 0 {
+		scrollIndicator = th.mutedStyle.Render(fmt.Sprintf("↑%d", m.logScroll))
+	}
+	title := titleSt.Render("≡ Logs  " + th.mutedStyle.Render("runtime log stream") + "  " + scrollIndicator)
 
 	sep := th.mutedStyle.Render(strings.Repeat("─", w-4))
-
-	placeholder := lipgloss.NewStyle().
-		Foreground(th.muted).
-		Italic(true).
-		Render("  coming soon — logs will stream here")
 
 	cardSt := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -772,7 +752,49 @@ func (m Model) renderLogsCard(th theme, w, h int) string {
 		cardSt = cardSt.BorderForeground(th.accent)
 	}
 
-	inner := strings.Join([]string{title, sep, "", placeholder}, "\n")
+	// Calculate visible lines
+	// h accounts for title + sep + padding, so usable lines for log content
+	usableH := h - 2 // title + separator
+	if usableH < 1 {
+		usableH = 1
+	}
+
+	if len(m.logLines) == 0 {
+		placeholder := lipgloss.NewStyle().
+			Foreground(th.muted).
+			Italic(true).
+			Render("  waiting for log output…")
+		inner := strings.Join([]string{title, sep, "", placeholder}, "\n")
+		inner = clampLines(inner, h)
+		return cardSt.Render(inner)
+	}
+
+	// Window into log lines based on scroll position
+	lineW := w - 6 // account for borders + padding
+	if lineW < 10 {
+		lineW = 10
+	}
+
+	total := len(m.logLines)
+	end := total - m.logScroll
+	if end < 1 {
+		end = 1
+	}
+	if end > total {
+		end = total
+	}
+	start := end - usableH
+	if start < 0 {
+		start = 0
+	}
+
+	visible := make([]string, 0, end-start)
+	for i := start; i < end; i++ {
+		visible = append(visible, formatLogLine(m.logLines[i], th, lineW))
+	}
+
+	inner := strings.Join(append([]string{title, sep}, visible...), "\n")
+	inner = clampLines(inner, h)
 	return cardSt.Render(inner)
 }
 
@@ -786,9 +808,9 @@ func (m Model) renderFooter(th theme, totalW int) string {
 		{"r", "refresh"},
 		{"tab", "panel"},
 		{"o", "otp"},
+		{"l", "logs"},
 		{"/", "search"},
 		{"c", "copy"},
-		{"s", "cf rules"},
 	}
 
 	kSt := lipgloss.NewStyle().
@@ -834,12 +856,13 @@ func (m Model) renderHelp(th theme) string {
 		col("r", "refresh all data"),
 		col("tab", "cycle panels"),
 		col("o", "jump to OTP panel"),
+		col("l", "jump to Logs panel"),
 		col("/", "search OTP events"),
+		col("G", "jump to bottom (logs)"),
 		col("c", "copy selected OTP"),
-		col("n", "create alias (aliases panel)"),
-		col("d", "delete alias / cf rule"),
-		col("s", "toggle cf rules view"),
-		col("e", "toggle cf rule enable/disable"),
+		col("n", "new mail account (routing rule)"),
+		col("d", "delete mail account"),
+		col("e", "toggle mail account enable/disable"),
 		col("↑↓ / j k", "navigate items"),
 		col("esc", "cancel / clear filter / back"),
 	}
@@ -1001,8 +1024,8 @@ func panelLabel(p Panel) string {
 	switch p {
 	case PanelStatus:
 		return "status"
-	case PanelAliases:
-		return "aliases"
+	case PanelMailAccount:
+		return "mail_account"
 	case PanelLatestOTP:
 		return "latest_otp"
 	case PanelLogs:
@@ -1010,19 +1033,6 @@ func panelLabel(p Panel) string {
 	default:
 		return "unknown"
 	}
-}
-
-type aliasesLoadedMsg struct {
-	aliases []domain.Alias
-	err     error
-}
-
-type aliasCreatedMsg struct {
-	err error
-}
-
-type aliasDeletedMsg struct {
-	err error
 }
 
 type otpHistoryLoadedMsg struct {
@@ -1041,6 +1051,11 @@ type cfRulesLoadedMsg struct {
 	err   error
 }
 
+type cfRuleCreatedMsg struct {
+	rule ports.RoutingRule
+	err  error
+}
+
 type cfRuleUpdatedMsg struct {
 	rule ports.RoutingRule
 	err  error
@@ -1050,52 +1065,12 @@ type cfRuleDeletedMsg struct {
 	err error
 }
 
-func (m Model) refreshAliasesCmd() tea.Cmd {
-	if m.aliasManager == nil {
-		return nil
-	}
+type logTickMsg struct{}
 
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.opContext(), m.opTimeout)
-		defer cancel()
-
-		rows, err := m.aliasManager.ListAliases(ctx)
-		if err != nil {
-			return aliasesLoadedMsg{err: err}
-		}
-		return aliasesLoadedMsg{aliases: rows}
-	}
-}
-
-func (m Model) createAliasCmd(platform, aliasEmail string) tea.Cmd {
-	if m.aliasManager == nil {
-		return nil
-	}
-
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.opContext(), m.cfOpTimeout)
-		defer cancel()
-
-		_, err := m.aliasManager.CreateAlias(ctx, app.CreateAliasInput{
-			Platform:   strings.TrimSpace(platform),
-			AliasEmail: strings.TrimSpace(aliasEmail),
-		})
-		return aliasCreatedMsg{err: err}
-	}
-}
-
-func (m Model) deleteAliasCmd(aliasEmail string) tea.Cmd {
-	if m.aliasManager == nil {
-		return nil
-	}
-
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.opContext(), m.cfOpTimeout)
-		defer cancel()
-
-		err := m.aliasManager.DeleteAlias(ctx, strings.TrimSpace(aliasEmail))
-		return aliasDeletedMsg{err: err}
-	}
+func (m Model) logTickCmd() tea.Cmd {
+	return tea.Tick(time.Second, func(_ time.Time) tea.Msg {
+		return logTickMsg{}
+	})
 }
 
 func (m Model) refreshOTPHistoryCmd(query string) tea.Cmd {
@@ -1131,6 +1106,26 @@ func (m Model) refreshCFRulesCmd() tea.Cmd {
 			return cfRulesLoadedMsg{err: err}
 		}
 		return cfRulesLoadedMsg{rules: rules}
+	}
+}
+
+func (m Model) createCFRuleCmd(aliasEmail string) tea.Cmd {
+	if m.rulesManager == nil {
+		return nil
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.opContext(), m.cfOpTimeout)
+		defer cancel()
+
+		rule, err := m.rulesManager.CreateRoutingRuleDirect(ctx, ports.CreateRoutingRuleInput{
+			AliasEmail: strings.TrimSpace(aliasEmail),
+			Enabled:    true,
+		})
+		if err != nil {
+			return cfRuleCreatedMsg{err: err}
+		}
+		return cfRuleCreatedMsg{rule: rule}
 	}
 }
 
@@ -1199,10 +1194,7 @@ func (m Model) nextRefreshAllCmd() (Model, tea.Cmd) {
 	reqAt := time.Now().UTC()
 	m.otpLastReqAt = reqAt
 
-	cmds := make([]tea.Cmd, 0, 3)
-	if cmd := m.refreshAliasesCmd(); cmd != nil {
-		cmds = append(cmds, cmd)
-	}
+	cmds := make([]tea.Cmd, 0, 2)
 	if cmd := m.refreshOTPHistoryCmdAt(m.otpSearchQuery, reqAt); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
@@ -1220,239 +1212,7 @@ func (m Model) nextRefreshAllCmd() (Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m Model) updateAliasesPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
-	key := msg.String()
-	if key == "ctrl+c" {
-		return m, tea.Quit, true
-	}
-
-	if m.deleteConfirm {
-		switch key {
-		case "y", "enter":
-			if len(m.aliases) == 0 || m.selected < 0 || m.selected >= len(m.aliases) {
-				m.deleteConfirm = false
-				m.ErrorMsg = "invalid alias selection"
-				m.LastAction = "delete alias failed"
-				return m, nil, true
-			}
-			alias := m.aliases[m.selected]
-			m.LastAction = "deleting alias..."
-			return m, m.deleteAliasCmd(alias.AliasEmail), true
-		case "n", "esc":
-			m.deleteConfirm = false
-			m.LastAction = "delete cancelled"
-			return m, nil, true
-		default:
-			return m, nil, true
-		}
-	}
-
-	if m.creating {
-		switch key {
-		case "esc":
-			m.creating = false
-			m.createPlatform = ""
-			m.createAliasEmail = ""
-			m.createField = 0
-			m.LastAction = "create alias cancelled"
-			return m, nil, true
-		case "tab":
-			m.createField = (m.createField + 1) % 2
-			return m, nil, true
-		case "enter":
-			if m.createField == 0 {
-				m.createField = 1
-				return m, nil, true
-			}
-			if strings.TrimSpace(m.createPlatform) == "" || strings.TrimSpace(m.createAliasEmail) == "" {
-				m.ErrorMsg = "platform and alias email are required"
-				return m, nil, true
-			}
-			m.LastAction = "creating alias..."
-			m.ErrorMsg = ""
-			return m, m.createAliasCmd(m.createPlatform, m.createAliasEmail), true
-		case "backspace":
-			if m.createField == 0 {
-				m.createPlatform = trimLastRune(m.createPlatform)
-			} else {
-				m.createAliasEmail = trimLastRune(m.createAliasEmail)
-			}
-			return m, nil, true
-		default:
-			if len(msg.Runes) > 0 {
-				r := msg.Runes[0]
-				if r >= 32 && r != 127 {
-					if m.createField == 0 {
-						if utf8.RuneCountInString(m.createPlatform) < maxAliasPlatformLen {
-							m.createPlatform += string(r)
-						}
-					} else {
-						if utf8.RuneCountInString(m.createAliasEmail) < maxAliasEmailLen {
-							m.createAliasEmail += string(r)
-						}
-					}
-				}
-			}
-			return m, nil, true
-		}
-	}
-
-	switch key {
-	case "n":
-		if m.aliasManager == nil {
-			m.ErrorMsg = "alias service unavailable"
-			return m, nil, true
-		}
-		m.creating = true
-		m.createPlatform = ""
-		m.createAliasEmail = ""
-		m.createField = 0
-		m.ErrorMsg = ""
-		m.LastAction = "create alias form"
-		return m, nil, true
-	case "s":
-		if m.rulesManager == nil {
-			m.ErrorMsg = "rules manager unavailable"
-			return m, nil, true
-		}
-		m.showCFRules = true
-		m.ErrorMsg = ""
-		m.LastAction = "cf rules view"
-		return m, m.refreshCFRulesCmd(), true
-	case "d":
-		if len(m.aliases) == 0 {
-			m.LastAction = "no alias to delete"
-			return m, nil, true
-		}
-		if m.aliasManager == nil {
-			m.ErrorMsg = "alias service unavailable"
-			return m, nil, true
-		}
-		m.deleteConfirm = true
-		m.LastAction = "confirm delete alias"
-		return m, nil, true
-	case "up", "k":
-		if len(m.aliases) > 0 && m.selected > 0 {
-			m.selected--
-		}
-		return m, nil, true
-	case "down", "j":
-		if len(m.aliases) > 0 && m.selected < len(m.aliases)-1 {
-			m.selected++
-		}
-		return m, nil, true
-	}
-
-	return m, nil, false
-}
-
-func (m Model) aliasPanelView(w int) string {
-	th := newTheme()
-
-	// Usable inner width (account for card border + padding)
-	inner := w - 4
-	if inner < 10 {
-		inner = 10
-	}
-
-	// ── Create form ──────────────────────────────────────────────────────────
-	if m.creating {
-		activeFieldSt := lipgloss.NewStyle().
-			Bold(true).Foreground(th.accent).
-			Border(lipgloss.NormalBorder(), false, false, true, false).
-			BorderForeground(th.accent).
-			Width(inner - 14)
-		inactiveFieldSt := lipgloss.NewStyle().
-			Foreground(th.fg).
-			Border(lipgloss.NormalBorder(), false, false, true, false).
-			BorderForeground(th.muted).
-			Width(inner - 14)
-
-		platLabel := th.mutedStyle.Render("  platform  ")
-		emailLabel := th.mutedStyle.Render("  email     ")
-		platValue := m.createPlatform + "▌"
-		emailValue := m.createAliasEmail + "▌"
-
-		var platField, emailField string
-		if m.createField == 0 {
-			platField = activeFieldSt.Render(platValue)
-			emailField = inactiveFieldSt.Render(emailValue)
-		} else {
-			platField = inactiveFieldSt.Render(platValue)
-			emailField = activeFieldSt.Render(emailValue)
-		}
-
-		hint := th.mutedStyle.Render("  enter  tab  esc")
-
-		return strings.Join([]string{
-			th.accentStyle.Render("  ✚ New Alias"),
-			"",
-			platLabel + platField,
-			emailLabel + emailField,
-			"",
-			hint,
-		}, "\n")
-	}
-
-	// ── Delete confirm ───────────────────────────────────────────────────────
-	if m.deleteConfirm {
-		alias := ""
-		if len(m.aliases) > 0 && m.selected >= 0 && m.selected < len(m.aliases) {
-			alias = truncate(m.aliases[m.selected].AliasEmail, inner-2)
-		}
-		return strings.Join([]string{
-			th.errStyle.Render("  ⚠  Delete?"),
-			"",
-			"  " + lipgloss.NewStyle().Foreground(th.fg).Render(alias),
-			"",
-			th.successStyle.Render("  y") + th.mutedStyle.Render(" confirm  ") +
-				th.errStyle.Render("n") + th.mutedStyle.Render(" cancel"),
-		}, "\n")
-	}
-
-	// ── Empty state ──────────────────────────────────────────────────────────
-	if len(m.aliases) == 0 {
-		return lipgloss.NewStyle().
-			Foreground(th.muted).
-			Italic(true).
-			Render("  no aliases  ·  press n")
-	}
-
-	// ── Alias list (compact for narrow sidebar) ───────────────────────────────
-	lines := make([]string, 0, len(m.aliases)*2+1)
-
-	for i, row := range m.aliases {
-		cursor := "  "
-		platSt := th.accentStyle.Copy().Bold(false)
-		emailSt := lipgloss.NewStyle().Foreground(th.muted)
-
-		if i == m.selected {
-			cursor = th.accentStyle.Render("▶ ")
-			platSt = th.accentStyle
-			emailSt = lipgloss.NewStyle().Foreground(th.fg)
-		}
-
-		dot := th.successStyle.Render("●")
-		if !row.Enabled {
-			dot = th.mutedStyle.Render("○")
-		}
-
-		platW := inner / 2
-		emailW := inner - platW - 4
-		if emailW < 8 {
-			emailW = 8
-		}
-
-		line := cursor + dot + " " +
-			platSt.Render(truncate(row.Platform, platW)) + "  " +
-			emailSt.Render(truncate(row.AliasEmail, emailW))
-		lines = append(lines, line)
-	}
-
-	return strings.Join(lines, "\n")
-}
-
-func (m Model) updateCFRulesPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
+func (m Model) updateMailAccountPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	key := msg.String()
 	if key == "ctrl+c" {
 		return m, tea.Quit, true
@@ -1463,31 +1223,67 @@ func (m Model) updateCFRulesPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		case "y", "enter":
 			if len(m.cfRules) == 0 || m.cfSelected < 0 || m.cfSelected >= len(m.cfRules) {
 				m.cfDeleteConfirm = false
-				m.ErrorMsg = "invalid cf rule selection"
-				m.LastAction = "delete cf rule failed"
+				m.ErrorMsg = "invalid mail account selection"
+				m.LastAction = "delete mail account failed"
 				return m, nil, true
 			}
 			rule := m.cfRules[m.cfSelected]
-			m.LastAction = "deleting cf rule..."
+			m.LastAction = "deleting mail account..."
 			return m, m.deleteCFRuleCmd(rule.ID), true
 		case "n", "esc":
 			m.cfDeleteConfirm = false
-			m.LastAction = "delete cf rule cancelled"
+			m.LastAction = "delete mail account cancelled"
 			return m, nil, true
 		default:
 			return m, nil, true
 		}
 	}
 
+	if m.creating {
+		switch key {
+		case "esc":
+			m.creating = false
+			m.createAliasEmail = ""
+			m.LastAction = "create mail account cancelled"
+			return m, nil, true
+		case "enter":
+			if strings.TrimSpace(m.createAliasEmail) == "" {
+				m.ErrorMsg = "email is required"
+				return m, nil, true
+			}
+			m.LastAction = "creating mail account..."
+			m.ErrorMsg = ""
+			return m, m.createCFRuleCmd(m.createAliasEmail), true
+		case "backspace":
+			m.createAliasEmail = trimLastRune(m.createAliasEmail)
+			return m, nil, true
+		default:
+			if len(msg.Runes) > 0 {
+				r := msg.Runes[0]
+				if r >= 32 && r != 127 {
+					if utf8.RuneCountInString(m.createAliasEmail) < maxAliasEmailLen {
+						m.createAliasEmail += string(r)
+					}
+				}
+			}
+			return m, nil, true
+		}
+	}
+
 	switch key {
-	case "s", "esc":
-		m.showCFRules = false
+	case "n":
+		if m.rulesManager == nil {
+			m.ErrorMsg = "rules manager unavailable"
+			return m, nil, true
+		}
+		m.creating = true
+		m.createAliasEmail = ""
 		m.ErrorMsg = ""
-		m.LastAction = "aliases view"
+		m.LastAction = "create mail account form"
 		return m, nil, true
 	case "e":
 		if len(m.cfRules) == 0 {
-			m.LastAction = "no cf rule to toggle"
+			m.LastAction = "no mail account to toggle"
 			return m, nil, true
 		}
 		if m.rulesManager == nil {
@@ -1503,11 +1299,11 @@ func (m Model) updateCFRulesPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		if !rule.Enabled {
 			status = "enabling"
 		}
-		m.LastAction = fmt.Sprintf("%s cf rule...", status)
+		m.LastAction = fmt.Sprintf("%s mail account...", status)
 		return m, m.toggleCFRuleCmd(rule), true
 	case "d":
 		if len(m.cfRules) == 0 {
-			m.LastAction = "no cf rule to delete"
+			m.LastAction = "no mail account to delete"
 			return m, nil, true
 		}
 		if m.rulesManager == nil {
@@ -1515,10 +1311,10 @@ func (m Model) updateCFRulesPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 			return m, nil, true
 		}
 		m.cfDeleteConfirm = true
-		m.LastAction = "confirm delete cf rule"
+		m.LastAction = "confirm delete mail account"
 		return m, nil, true
 	case "r":
-		m.LastAction = "refreshing cf rules..."
+		m.LastAction = "refreshing mail accounts..."
 		return m, m.refreshCFRulesCmd(), true
 	case "up", "k":
 		if len(m.cfRules) > 0 && m.cfSelected > 0 {
@@ -1535,12 +1331,35 @@ func (m Model) updateCFRulesPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	return m, nil, false
 }
 
-func (m Model) cfRulesPanelView(w int) string {
+func (m Model) mailAccountPanelView(w int) string {
 	th := newTheme()
 
 	inner := w - 4
 	if inner < 10 {
 		inner = 10
+	}
+
+	// ── Create form ──────────────────────────────────────────────────────────
+	if m.creating {
+		activeFieldSt := lipgloss.NewStyle().
+			Bold(true).Foreground(th.accent).
+			Border(lipgloss.NormalBorder(), false, false, true, false).
+			BorderForeground(th.accent).
+			Width(inner - 14)
+
+		emailLabel := th.mutedStyle.Render("  email     ")
+		emailValue := m.createAliasEmail + "▌"
+		emailField := activeFieldSt.Render(emailValue)
+
+		hint := th.mutedStyle.Render("  enter submit  esc cancel")
+
+		return strings.Join([]string{
+			th.accentStyle.Render("  ✚ New Mail Account"),
+			"",
+			emailLabel + emailField,
+			"",
+			hint,
+		}, "\n")
 	}
 
 	// ── Delete confirm ───────────────────────────────────────────────────────
@@ -1554,7 +1373,7 @@ func (m Model) cfRulesPanelView(w int) string {
 			}
 		}
 		return strings.Join([]string{
-			th.errStyle.Render("  ⚠  Delete CF Rule?"),
+			th.errStyle.Render("  ⚠  Delete Mail Account?"),
 			"",
 			"  " + lipgloss.NewStyle().Foreground(th.fg).Render(ruleLabel),
 			"",
@@ -1568,10 +1387,10 @@ func (m Model) cfRulesPanelView(w int) string {
 		return lipgloss.NewStyle().
 			Foreground(th.muted).
 			Italic(true).
-			Render("  no cf routing rules found")
+			Render("  no mail accounts  ·  press n")
 	}
 
-	// ── CF Rules list ────────────────────────────────────────────────────────
+	// ── Mail Account list ────────────────────────────────────────────────────
 	lines := make([]string, 0, len(m.cfRules)+1)
 
 	for i, rule := range m.cfRules {
@@ -1682,6 +1501,40 @@ func (m Model) updateOTPPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	return m, nil, false
 }
 
+func (m Model) updateLogsPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
+	key := msg.String()
+	if key == "ctrl+c" {
+		return m, tea.Quit, true
+	}
+
+	switch key {
+	case "up", "k":
+		maxScroll := len(m.logLines) - 1
+		if maxScroll < 0 {
+			maxScroll = 0
+		}
+		if m.logScroll < maxScroll {
+			m.logScroll++
+			m.logAutoScroll = false
+		}
+		return m, nil, true
+	case "down", "j":
+		if m.logScroll > 0 {
+			m.logScroll--
+			if m.logScroll == 0 {
+				m.logAutoScroll = true
+			}
+		}
+		return m, nil, true
+	case "G":
+		m.logScroll = 0
+		m.logAutoScroll = true
+		return m, nil, true
+	}
+
+	return m, nil, false
+}
+
 func (m Model) opContext() context.Context {
 	if m.opParentCtx != nil {
 		return m.opParentCtx
@@ -1772,4 +1625,54 @@ func sanitizeMailboxMode(mode string) string {
 	default:
 		return "unknown"
 	}
+}
+
+// formatLogLine parses a JSONL log line and renders it with colored level,
+// timestamp, event, and message. Falls back to showing the raw line in muted
+// style if the line is not valid JSON.
+func formatLogLine(raw string, th theme, maxW int) string {
+	if maxW <= 0 {
+		return ""
+	}
+
+	type logEntry struct {
+		Ts     string         `json:"ts"`
+		Level  string         `json:"level"`
+		Event  string         `json:"event"`
+		Msg    string         `json:"msg"`
+		Fields map[string]any `json:"fields"`
+	}
+
+	var entry logEntry
+	if err := json.Unmarshal([]byte(raw), &entry); err != nil {
+		// Not valid JSON — show raw line muted
+		return "  " + th.mutedStyle.Render(truncate(raw, maxW-2))
+	}
+
+	// Parse timestamp — show HH:MM:SS
+	ts := entry.Ts
+	if t, err := time.Parse(time.RFC3339Nano, entry.Ts); err == nil {
+		ts = t.Format("15:04:05")
+	}
+
+	// Colorize level
+	var levelStr string
+	switch strings.ToLower(entry.Level) {
+	case "error":
+		levelStr = th.errStyle.Render("ERR")
+	case "warn":
+		levelStr = th.warnStyle.Render("WRN")
+	default:
+		levelStr = th.successStyle.Render("INF")
+	}
+
+	tsStr := th.purpleStyle.Render(ts)
+	eventStr := th.accentStyle.Copy().Bold(false).Render(truncate(entry.Event, 30))
+	msgW := maxW - 50
+	if msgW < 10 {
+		msgW = 10
+	}
+	msgStr := th.base.Render(truncate(entry.Msg, msgW))
+
+	return fmt.Sprintf("  %s %s %s %s", tsStr, levelStr, eventStr, msgStr)
 }

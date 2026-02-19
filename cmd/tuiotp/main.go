@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -60,7 +61,8 @@ func main() {
 	}
 	defer closeLogFile()
 
-	logger := observability.NewLogger(logWriter, observability.NewRedactor([]string{
+	logRing := observability.NewRingBuffer(observability.DefaultLogBufferSize)
+	logger := observability.NewLogger(io.MultiWriter(logWriter, logRing), observability.NewRedactor([]string{
 		cfg.Cloudflare.APIToken,
 		cfg.Mailbox.IMAP.Password,
 	}))
@@ -140,10 +142,10 @@ func main() {
 	}
 
 	p := tea.NewProgram(ui.NewModelWithConfig(ui.ModelConfig{
-		AliasManager: tuiApp.AliasService(),
 		OTPManager:   tuiApp,
 		RulesManager: tuiApp.AliasService(),
 		Clipboard:    clip,
+		LogBuffer:    logRing,
 		Health: ui.HealthStatus{
 			Cloudflare:  "ready",
 			Destination: "ready",

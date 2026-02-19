@@ -15,19 +15,6 @@ import (
 	"tuiotp/internal/ports"
 )
 
-type fakeAliasManager struct {
-	listRows []domain.Alias
-	listErr  error
-
-	createErr   error
-	deleteErr   error
-	createCalls int
-	deleteCalls int
-
-	lastCreate app.CreateAliasInput
-	lastDelete string
-}
-
 type fakeOTPManager struct {
 	rows      []domain.OTPEvent
 	err       error
@@ -58,30 +45,6 @@ func (f *fakeOTPManager) ListOTPEvents(_ context.Context, filter app.OTPListFilt
 	out := make([]domain.OTPEvent, len(f.rows))
 	copy(out, f.rows)
 	return out, nil
-}
-
-func (f *fakeAliasManager) ListAliases(_ context.Context) ([]domain.Alias, error) {
-	if f.listErr != nil {
-		return nil, f.listErr
-	}
-	out := make([]domain.Alias, len(f.listRows))
-	copy(out, f.listRows)
-	return out, nil
-}
-
-func (f *fakeAliasManager) CreateAlias(_ context.Context, in app.CreateAliasInput) (domain.Alias, error) {
-	f.createCalls++
-	f.lastCreate = in
-	if f.createErr != nil {
-		return domain.Alias{}, f.createErr
-	}
-	return domain.Alias{ID: 1, Platform: in.Platform, AliasEmail: in.AliasEmail, RuleID: "rule-1"}, nil
-}
-
-func (f *fakeAliasManager) DeleteAlias(_ context.Context, aliasEmail string) error {
-	f.deleteCalls++
-	f.lastDelete = aliasEmail
-	return f.deleteErr
 }
 
 func TestNewModel_DefaultState(t *testing.T) {
@@ -140,8 +103,8 @@ func TestModel_Update_GlobalKeymaps(t *testing.T) {
 
 	updated, cmd = m2.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m3 := updated.(Model)
-	if m3.ActivePanel != PanelAliases {
-		t.Fatalf("expected panel switch to aliases, got %v", m3.ActivePanel)
+	if m3.ActivePanel != PanelMailAccount {
+		t.Fatalf("expected panel switch to mail account, got %v", m3.ActivePanel)
 	}
 	if cmd != nil {
 		t.Fatalf("expected nil command for tab")
@@ -157,25 +120,6 @@ func TestModel_Update_GlobalKeymaps(t *testing.T) {
 	_ = updated
 }
 
-func TestModel_Init_LoadAliasesWhenManagerConfigured(t *testing.T) {
-	fake := &fakeAliasManager{listRows: []domain.Alias{{AliasEmail: "a@example.com"}}}
-	m := NewModelWithConfig(ModelConfig{AliasManager: fake})
-
-	cmd := m.Init()
-	if cmd == nil {
-		t.Fatalf("expected init command when alias manager is configured")
-	}
-
-	msg := cmd()
-	loaded, ok := msg.(aliasesLoadedMsg)
-	if !ok {
-		t.Fatalf("expected aliasesLoadedMsg, got %T", msg)
-	}
-	if loaded.err != nil || len(loaded.aliases) != 1 {
-		t.Fatalf("unexpected loaded aliases result: %+v", loaded)
-	}
-}
-
 func TestModel_Update_TabCyclesPanels(t *testing.T) {
 	m := NewModel()
 
@@ -186,169 +130,6 @@ func TestModel_Update_TabCyclesPanels(t *testing.T) {
 
 	if m.ActivePanel != PanelStatus {
 		t.Fatalf("expected tab to cycle back to status, got %v", m.ActivePanel)
-	}
-}
-
-func TestModel_AliasCreateFlow_SubmitAndRefresh(t *testing.T) {
-	fake := &fakeAliasManager{}
-	m := NewModelWithConfig(ModelConfig{AliasManager: fake})
-	m.ActivePanel = PanelAliases
-
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
-	m = updated.(Model)
-	if !m.creating || cmd != nil {
-		t.Fatalf("expected entering create mode without command")
-	}
-
-	for _, r := range []rune("SHOP") {
-		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-		m = updated.(Model)
-	}
-
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	m = updated.(Model)
-	if m.createField != 1 {
-		t.Fatalf("expected alias email field selected")
-	}
-
-	for _, r := range []rune("shop@example.com") {
-		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-		m = updated.(Model)
-	}
-
-	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = updated.(Model)
-	if cmd == nil {
-		t.Fatalf("expected create alias command on submit")
-	}
-
-	createMsg := cmd()
-	created, ok := createMsg.(aliasCreatedMsg)
-	if !ok {
-		t.Fatalf("expected aliasCreatedMsg, got %T", createMsg)
-	}
-	if created.err != nil {
-		t.Fatalf("unexpected create error: %v", created.err)
-	}
-	if fake.createCalls != 1 {
-		t.Fatalf("expected one create call, got %d", fake.createCalls)
-	}
-	if fake.lastCreate.Platform != "SHOP" || fake.lastCreate.AliasEmail != "shop@example.com" {
-		t.Fatalf("unexpected create input: %+v", fake.lastCreate)
-	}
-
-	updated, cmd = m.Update(createMsg)
-	m = updated.(Model)
-	if m.creating {
-		t.Fatalf("expected create mode closed after success")
-	}
-	if cmd == nil {
-		t.Fatalf("expected refresh command after create")
-	}
-}
-
-func TestModel_AliasDeleteFlow_ConfirmAndRefresh(t *testing.T) {
-	fake := &fakeAliasManager{}
-	m := NewModelWithConfig(ModelConfig{AliasManager: fake})
-	m.ActivePanel = PanelAliases
-	m.aliases = []domain.Alias{{Platform: "SHOP", AliasEmail: "shop@example.com", RuleID: "r1"}}
-
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	m = updated.(Model)
-	if !m.deleteConfirm || cmd != nil {
-		t.Fatalf("expected delete confirmation mode")
-	}
-
-	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
-	m = updated.(Model)
-	if cmd == nil {
-		t.Fatalf("expected delete command on confirm")
-	}
-
-	deleteMsg := cmd()
-	deleted, ok := deleteMsg.(aliasDeletedMsg)
-	if !ok {
-		t.Fatalf("expected aliasDeletedMsg, got %T", deleteMsg)
-	}
-	if deleted.err != nil {
-		t.Fatalf("unexpected delete error: %v", deleted.err)
-	}
-	if fake.deleteCalls != 1 || fake.lastDelete != "shop@example.com" {
-		t.Fatalf("unexpected delete call: calls=%d alias=%q", fake.deleteCalls, fake.lastDelete)
-	}
-
-	updated, cmd = m.Update(deleteMsg)
-	m = updated.(Model)
-	if m.deleteConfirm {
-		t.Fatalf("expected delete confirm cleared after success")
-	}
-	if cmd == nil {
-		t.Fatalf("expected refresh command after delete")
-	}
-}
-
-func TestModel_AliasCreateFlow_ShieldsGlobalQuitWhileTyping(t *testing.T) {
-	m := NewModelWithConfig(ModelConfig{AliasManager: &fakeAliasManager{}})
-	m.ActivePanel = PanelAliases
-
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
-	m = updated.(Model)
-
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
-	m = updated.(Model)
-	if cmd != nil {
-		t.Fatalf("expected no quit command while create form is active")
-	}
-	if !strings.Contains(m.createPlatform, "q") {
-		t.Fatalf("expected typed rune to go into create form field")
-	}
-}
-
-func TestModel_AliasRefreshError_ShowsErrorLine(t *testing.T) {
-	fake := &fakeAliasManager{listErr: errors.New("list failed")}
-	m := NewModelWithConfig(ModelConfig{AliasManager: fake})
-
-	cmd := m.refreshAliasesCmd()
-	if cmd == nil {
-		t.Fatalf("expected refresh command")
-	}
-
-	updated, _ := m.Update(cmd())
-	m = updated.(Model)
-	if !strings.Contains(m.ErrorMsg, "refresh aliases failed") {
-		t.Fatalf("expected list error recorded, got %q", m.ErrorMsg)
-	}
-	if !contains(m.View(), "refresh aliases failed") {
-		t.Fatalf("expected error message in view")
-	}
-}
-
-func TestModel_AliasDeleteFlow_InvalidSelection_NoPanic(t *testing.T) {
-	m := NewModelWithConfig(ModelConfig{AliasManager: &fakeAliasManager{}})
-	m.ActivePanel = PanelAliases
-	m.aliases = []domain.Alias{{AliasEmail: "a@example.com"}}
-	m.selected = 9
-	m.deleteConfirm = true
-
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = updated.(Model)
-	if cmd != nil {
-		t.Fatalf("expected no command on invalid selection")
-	}
-	if m.deleteConfirm {
-		t.Fatalf("expected delete confirm cleared")
-	}
-	if !contains(m.ErrorMsg, "invalid alias selection") {
-		t.Fatalf("expected invalid selection error, got %q", m.ErrorMsg)
-	}
-}
-
-func TestTrimLastRune_UnicodeSafe(t *testing.T) {
-	if got := trimLastRune("A😊"); got != "A" {
-		t.Fatalf("expected rune-safe trim result 'A', got %q", got)
-	}
-	if got := trimLastRune(""); got != "" {
-		t.Fatalf("expected empty string for empty input, got %q", got)
 	}
 }
 
@@ -364,8 +145,8 @@ func TestModel_View_HelpAndPanelHighlight(t *testing.T) {
 	if !contains(view, "Keyboard Shortcuts") || !contains(view, "quit application") {
 		t.Fatalf("expected help section in view")
 	}
-	if strings.Count(view, "Aliases") < 1 {
-		t.Fatalf("expected aliases section rendered")
+	if strings.Count(view, "Mail Account") < 1 {
+		t.Fatalf("expected mail account section rendered")
 	}
 }
 
@@ -491,17 +272,20 @@ func TestModel_OTPPanel_IgnoreStaleHistoryResponse(t *testing.T) {
 }
 
 func TestModel_ModalCtrlCQuits(t *testing.T) {
-	m := NewModelWithConfig(ModelConfig{AliasManager: &fakeAliasManager{}})
-	m.ActivePanel = PanelAliases
+	fakeRules := &fakeRulesManager{}
+	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
+	m.ActivePanel = PanelMailAccount
+
+	// Enter create mode
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	m = updated.(Model)
 
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	if cmd == nil {
-		t.Fatalf("expected quit command for ctrl+c in alias create mode")
+		t.Fatalf("expected quit command for ctrl+c in mail account create mode")
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
-		t.Fatalf("expected tea.QuitMsg from ctrl+c in alias create mode")
+		t.Fatalf("expected tea.QuitMsg from ctrl+c in mail account create mode")
 	}
 
 	m2 := NewModelWithConfig(ModelConfig{})
@@ -679,14 +463,12 @@ func TestModel_Update_RuntimeErrorEvent_ReflectsRuntimeFailureInStatus(t *testin
 }
 
 func TestModel_View_FitsWithinTerminalHeight(t *testing.T) {
-	// The rendered View must never exceed the terminal height (m.Height),
-	// otherwise the top bar gets pushed off-screen in AltScreen mode.
 	sizes := []struct{ w, h int }{
 		{120, 40},
 		{80, 24},
 		{200, 60},
 		{100, 30},
-		{40, 12}, // narrow + short
+		{40, 12},
 	}
 
 	makeEvents := func() []domain.OTPEvent {
@@ -697,10 +479,10 @@ func TestModel_View_FitsWithinTerminalHeight(t *testing.T) {
 			{Platform: "SOCIAL", OTPCode: "111111", AliasEmail: "social@example.com", ReceivedAt: now},
 		}
 	}
-	makeAliases := func() []domain.Alias {
-		return []domain.Alias{
-			{Platform: "SHOP", AliasEmail: "shop@example.com", Enabled: true},
-			{Platform: "BANK", AliasEmail: "bank@example.com", Enabled: false},
+	makeRules := func() []ports.RoutingRule {
+		return []ports.RoutingRule{
+			{ID: "r1", Name: "rule1", AliasEmail: "shop@example.com", Enabled: true},
+			{ID: "r2", Name: "rule2", AliasEmail: "bank@example.com", Enabled: false},
 		}
 	}
 
@@ -716,9 +498,9 @@ func TestModel_View_FitsWithinTerminalHeight(t *testing.T) {
 				sz.w, sz.h, renderedH, sz.h)
 		}
 
-		// Case 2: with OTP events and aliases
+		// Case 2: with OTP events and mail accounts
 		m.otpEvents = makeEvents()
-		m.aliases = makeAliases()
+		m.cfRules = makeRules()
 		output = m.View()
 		renderedH = strings.Count(output, "\n") + 1
 		if renderedH > sz.h {
@@ -737,6 +519,15 @@ func TestModel_View_FitsWithinTerminalHeight(t *testing.T) {
 	}
 }
 
+func TestTrimLastRune_UnicodeSafe(t *testing.T) {
+	if got := trimLastRune("A😊"); got != "A" {
+		t.Fatalf("expected rune-safe trim result 'A', got %q", got)
+	}
+	if got := trimLastRune(""); got != "" {
+		t.Fatalf("expected empty string for empty input, got %q", got)
+	}
+}
+
 func contains(s, sub string) bool {
 	return strings.Contains(s, sub)
 }
@@ -747,6 +538,10 @@ type fakeRulesManager struct {
 	listResult   []ports.RoutingRule
 	listErr      error
 	listCalls    int
+	createResult ports.RoutingRule
+	createErr    error
+	createCalls  int
+	lastCreate   ports.CreateRoutingRuleInput
 	updateResult ports.RoutingRule
 	updateErr    error
 	updateCalls  int
@@ -766,6 +561,15 @@ func (f *fakeRulesManager) ListRoutingRules(_ context.Context) ([]ports.RoutingR
 	return out, nil
 }
 
+func (f *fakeRulesManager) CreateRoutingRuleDirect(_ context.Context, in ports.CreateRoutingRuleInput) (ports.RoutingRule, error) {
+	f.createCalls++
+	f.lastCreate = in
+	if f.createErr != nil {
+		return ports.RoutingRule{}, f.createErr
+	}
+	return f.createResult, nil
+}
+
 func (f *fakeRulesManager) UpdateRoutingRule(_ context.Context, in ports.UpdateRoutingRuleInput) (ports.RoutingRule, error) {
 	f.updateCalls++
 	f.lastUpdate = in
@@ -781,9 +585,9 @@ func (f *fakeRulesManager) DeleteRoutingRuleByID(_ context.Context, ruleID strin
 	return f.deleteErr
 }
 
-// ── CF Rules tests ───────────────────────────────────────────────────────────
+// ── Mail Account (CF Rules) tests ────────────────────────────────────────────
 
-func TestModel_Init_LoadsCFRulesWhenManagerConfigured(t *testing.T) {
+func TestModel_Init_LoadsMailAccountsWhenManagerConfigured(t *testing.T) {
 	fakeRules := &fakeRulesManager{listResult: []ports.RoutingRule{
 		{ID: "r1", Name: "tuiotp:SHOP:shop", Enabled: true, AliasEmail: "shop@example.com", Destination: []string{"dest@example.com"}},
 	}}
@@ -800,14 +604,14 @@ func TestModel_Init_LoadsCFRulesWhenManagerConfigured(t *testing.T) {
 		t.Fatalf("expected cfRulesLoadedMsg, got %T", msg)
 	}
 	if loaded.err != nil || len(loaded.rules) != 1 {
-		t.Fatalf("unexpected loaded cf rules result: %+v", loaded)
+		t.Fatalf("unexpected loaded mail accounts result: %+v", loaded)
 	}
 	if fakeRules.listCalls != 1 {
 		t.Fatalf("expected one list call, got %d", fakeRules.listCalls)
 	}
 }
 
-func TestModel_CFRulesLoaded_StoresRulesAndClampsSelection(t *testing.T) {
+func TestModel_MailAccountLoaded_StoresRulesAndClampsSelection(t *testing.T) {
 	m := NewModel()
 	m.cfSelected = 5
 
@@ -820,81 +624,171 @@ func TestModel_CFRulesLoaded_StoresRulesAndClampsSelection(t *testing.T) {
 	m = updated.(Model)
 
 	if len(m.cfRules) != 2 {
-		t.Fatalf("expected 2 cf rules, got %d", len(m.cfRules))
+		t.Fatalf("expected 2 mail accounts, got %d", len(m.cfRules))
 	}
 	if m.cfSelected != 1 {
 		t.Fatalf("expected cfSelected clamped to 1, got %d", m.cfSelected)
 	}
-	if !contains(m.LastAction, "cf rules refreshed") {
-		t.Fatalf("expected cf rules refreshed action, got %q", m.LastAction)
+	if !contains(m.LastAction, "mail accounts refreshed") {
+		t.Fatalf("expected mail accounts refreshed action, got %q", m.LastAction)
 	}
 }
 
-func TestModel_CFRulesLoaded_Error(t *testing.T) {
+func TestModel_MailAccountLoaded_Error(t *testing.T) {
 	m := NewModel()
 
 	updated, _ := m.Update(cfRulesLoadedMsg{err: errors.New("cf api down")})
 	m = updated.(Model)
 
-	if !contains(m.ErrorMsg, "refresh cf rules failed") {
-		t.Fatalf("expected cf rules error msg, got %q", m.ErrorMsg)
+	if !contains(m.ErrorMsg, "refresh mail accounts failed") {
+		t.Fatalf("expected mail accounts error msg, got %q", m.ErrorMsg)
 	}
-	if m.LastAction != "cf rules refresh failed" {
-		t.Fatalf("expected cf rules refresh failed action, got %q", m.LastAction)
+	if m.LastAction != "mail accounts refresh failed" {
+		t.Fatalf("expected mail accounts refresh failed action, got %q", m.LastAction)
 	}
 }
 
-func TestModel_CFRulesView_ToggleWithSKey(t *testing.T) {
-	fakeRules := &fakeRulesManager{listResult: []ports.RoutingRule{
-		{ID: "r1", Name: "rule1", Enabled: true, AliasEmail: "a@example.com"},
-	}}
-	m := NewModelWithConfig(ModelConfig{AliasManager: &fakeAliasManager{}, RulesManager: fakeRules})
-	m.ActivePanel = PanelAliases
+func TestModel_MailAccount_CreateFlow_SubmitAndRefresh(t *testing.T) {
+	fakeRules := &fakeRulesManager{
+		createResult: ports.RoutingRule{ID: "r-new", Name: "tuiotp:shop", Enabled: true, AliasEmail: "shop@example.com"},
+	}
+	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
+	m.ActivePanel = PanelMailAccount
 
-	// Press s to enter CF rules view
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	// Press n to enter create mode
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	m = updated.(Model)
-	if !m.showCFRules {
-		t.Fatalf("expected showCFRules=true after pressing s")
+	if !m.creating || cmd != nil {
+		t.Fatalf("expected entering create mode without command")
+	}
+
+	// Type alias email
+	for _, r := range []rune("shop@example.com") {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(Model)
+	}
+
+	if m.createAliasEmail != "shop@example.com" {
+		t.Fatalf("expected createAliasEmail to be 'shop@example.com', got %q", m.createAliasEmail)
+	}
+
+	// Submit
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected create mail account command on submit")
+	}
+
+	createMsg := cmd()
+	created, ok := createMsg.(cfRuleCreatedMsg)
+	if !ok {
+		t.Fatalf("expected cfRuleCreatedMsg, got %T", createMsg)
+	}
+	if created.err != nil {
+		t.Fatalf("unexpected create error: %v", created.err)
+	}
+	if fakeRules.createCalls != 1 {
+		t.Fatalf("expected one create call, got %d", fakeRules.createCalls)
+	}
+	if fakeRules.lastCreate.AliasEmail != "shop@example.com" {
+		t.Fatalf("unexpected create input: %+v", fakeRules.lastCreate)
+	}
+	if !fakeRules.lastCreate.Enabled {
+		t.Fatalf("expected new rule to be enabled by default")
+	}
+
+	// Process the creation result
+	updated, cmd = m.Update(createMsg)
+	m = updated.(Model)
+	if m.creating {
+		t.Fatalf("expected create mode closed after success")
 	}
 	if cmd == nil {
-		t.Fatalf("expected refresh command when entering cf rules view")
+		t.Fatalf("expected refresh command after create")
 	}
-	if m.LastAction != "cf rules view" {
-		t.Fatalf("expected cf rules view action, got %q", m.LastAction)
-	}
-
-	// Press s again to go back
-	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
-	m = updated.(Model)
-	if m.showCFRules {
-		t.Fatalf("expected showCFRules=false after pressing s again")
-	}
-	if cmd != nil {
-		t.Fatalf("expected no command when exiting cf rules view")
-	}
-	if m.LastAction != "aliases view" {
-		t.Fatalf("expected aliases view action, got %q", m.LastAction)
+	if m.LastAction != "mail account created" {
+		t.Fatalf("expected mail account created action, got %q", m.LastAction)
 	}
 }
 
-func TestModel_CFRulesView_EscGoesBack(t *testing.T) {
+func TestModel_MailAccount_CreateFlow_ShieldsGlobalQuitWhileTyping(t *testing.T) {
 	fakeRules := &fakeRulesManager{}
 	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
-	m.ActivePanel = PanelAliases
-	m.showCFRules = true
+	m.ActivePanel = PanelMailAccount
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = updated.(Model)
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("expected no quit command while create form is active")
+	}
+	if !strings.Contains(m.createAliasEmail, "q") {
+		t.Fatalf("expected typed rune to go into create form field")
+	}
+}
+
+func TestModel_MailAccount_CreateFlow_EmptyEmail(t *testing.T) {
+	fakeRules := &fakeRulesManager{}
+	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
+	m.ActivePanel = PanelMailAccount
+	m.creating = true
+
+	// Submit with empty email
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("expected no command for empty email submit")
+	}
+	if !contains(m.ErrorMsg, "email is required") {
+		t.Fatalf("expected email required error, got %q", m.ErrorMsg)
+	}
+}
+
+func TestModel_MailAccount_CreateFlow_CancelWithEsc(t *testing.T) {
+	fakeRules := &fakeRulesManager{}
+	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
+	m.ActivePanel = PanelMailAccount
+	m.creating = true
+	m.createAliasEmail = "shop@example.com"
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = updated.(Model)
-	if m.showCFRules {
-		t.Fatalf("expected showCFRules=false after esc")
+	if m.creating {
+		t.Fatalf("expected create mode closed after esc")
+	}
+	if m.createAliasEmail != "" {
+		t.Fatalf("expected createAliasEmail cleared after esc")
+	}
+	if m.LastAction != "create mail account cancelled" {
+		t.Fatalf("expected cancelled action, got %q", m.LastAction)
 	}
 }
 
-func TestModel_CFRulesView_NavigationUpDown(t *testing.T) {
+func TestModel_MailAccount_CreateFlow_Error(t *testing.T) {
+	fakeRules := &fakeRulesManager{createErr: errors.New("cf api error")}
+	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
+	m.ActivePanel = PanelMailAccount
+	m.creating = true
+	m.createAliasEmail = "shop@example.com"
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("expected create command")
+	}
+
+	msg := cmd()
+	updated, _ := m.Update(msg)
+	m = updated.(Model)
+	if !contains(m.ErrorMsg, "create mail account failed") {
+		t.Fatalf("expected create error message, got %q", m.ErrorMsg)
+	}
+}
+
+func TestModel_MailAccount_NavigationUpDown(t *testing.T) {
 	m := NewModel()
-	m.ActivePanel = PanelAliases
-	m.showCFRules = true
+	m.ActivePanel = PanelMailAccount
 	m.cfRules = []ports.RoutingRule{
 		{ID: "r1", Name: "rule1", Enabled: true, AliasEmail: "a@example.com"},
 		{ID: "r2", Name: "rule2", Enabled: false, AliasEmail: "b@example.com"},
@@ -942,7 +836,7 @@ func TestModel_CFRulesView_NavigationUpDown(t *testing.T) {
 	}
 }
 
-func TestModel_CFRulesView_ToggleEnableDisable(t *testing.T) {
+func TestModel_MailAccount_ToggleEnableDisable(t *testing.T) {
 	fakeRules := &fakeRulesManager{
 		updateResult: ports.RoutingRule{ID: "r1", Name: "rule1", Enabled: false, AliasEmail: "a@example.com", Destination: []string{"dest@example.com"}},
 		listResult: []ports.RoutingRule{
@@ -950,8 +844,7 @@ func TestModel_CFRulesView_ToggleEnableDisable(t *testing.T) {
 		},
 	}
 	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
-	m.ActivePanel = PanelAliases
-	m.showCFRules = true
+	m.ActivePanel = PanelMailAccount
 	m.cfRules = []ports.RoutingRule{
 		{ID: "r1", Name: "rule1", Enabled: true, AliasEmail: "a@example.com", Destination: []string{"dest@example.com"}, Priority: 10},
 	}
@@ -978,7 +871,6 @@ func TestModel_CFRulesView_ToggleEnableDisable(t *testing.T) {
 	if fakeRules.updateCalls != 1 {
 		t.Fatalf("expected one update call, got %d", fakeRules.updateCalls)
 	}
-	// The update should toggle enabled from true to false
 	if fakeRules.lastUpdate.Enabled != false {
 		t.Fatalf("expected toggle to disable (enabled=false), got enabled=%v", fakeRules.lastUpdate.Enabled)
 	}
@@ -989,19 +881,18 @@ func TestModel_CFRulesView_ToggleEnableDisable(t *testing.T) {
 	// Process toggle result
 	updated, cmd = m.Update(msg)
 	m = updated.(Model)
-	if m.LastAction != "cf rule disabled" {
-		t.Fatalf("expected cf rule disabled action, got %q", m.LastAction)
+	if m.LastAction != "mail account disabled" {
+		t.Fatalf("expected mail account disabled action, got %q", m.LastAction)
 	}
 	if cmd == nil {
 		t.Fatalf("expected refresh command after toggle")
 	}
 }
 
-func TestModel_CFRulesView_ToggleError(t *testing.T) {
+func TestModel_MailAccount_ToggleError(t *testing.T) {
 	fakeRules := &fakeRulesManager{updateErr: errors.New("toggle failed")}
 	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
-	m.ActivePanel = PanelAliases
-	m.showCFRules = true
+	m.ActivePanel = PanelMailAccount
 	m.cfRules = []ports.RoutingRule{
 		{ID: "r1", Name: "rule1", Enabled: true, AliasEmail: "a@example.com"},
 	}
@@ -1012,20 +903,19 @@ func TestModel_CFRulesView_ToggleError(t *testing.T) {
 
 	updated, _ = m.Update(msg)
 	m = updated.(Model)
-	if !contains(m.ErrorMsg, "toggle cf rule failed") {
+	if !contains(m.ErrorMsg, "toggle mail account failed") {
 		t.Fatalf("expected toggle error message, got %q", m.ErrorMsg)
 	}
 }
 
-func TestModel_CFRulesView_DeleteFlow(t *testing.T) {
+func TestModel_MailAccount_DeleteFlow(t *testing.T) {
 	fakeRules := &fakeRulesManager{
 		listResult: []ports.RoutingRule{
 			{ID: "r1", Name: "rule1", Enabled: true, AliasEmail: "a@example.com"},
 		},
 	}
 	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
-	m.ActivePanel = PanelAliases
-	m.showCFRules = true
+	m.ActivePanel = PanelMailAccount
 	m.cfRules = []ports.RoutingRule{
 		{ID: "r1", Name: "rule1", Enabled: true, AliasEmail: "a@example.com"},
 	}
@@ -1034,7 +924,7 @@ func TestModel_CFRulesView_DeleteFlow(t *testing.T) {
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	m = updated.(Model)
 	if !m.cfDeleteConfirm || cmd != nil {
-		t.Fatalf("expected cf delete confirmation mode")
+		t.Fatalf("expected delete confirmation mode")
 	}
 
 	// Press y to confirm
@@ -1063,18 +953,17 @@ func TestModel_CFRulesView_DeleteFlow(t *testing.T) {
 	if m.cfDeleteConfirm {
 		t.Fatalf("expected cfDeleteConfirm cleared after success")
 	}
-	if m.LastAction != "cf rule deleted" {
-		t.Fatalf("expected cf rule deleted action, got %q", m.LastAction)
+	if m.LastAction != "mail account deleted" {
+		t.Fatalf("expected mail account deleted action, got %q", m.LastAction)
 	}
 	if cmd == nil {
 		t.Fatalf("expected refresh command after delete")
 	}
 }
 
-func TestModel_CFRulesView_DeleteCancelWithN(t *testing.T) {
+func TestModel_MailAccount_DeleteCancelWithN(t *testing.T) {
 	m := NewModel()
-	m.ActivePanel = PanelAliases
-	m.showCFRules = true
+	m.ActivePanel = PanelMailAccount
 	m.cfDeleteConfirm = true
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
@@ -1082,15 +971,14 @@ func TestModel_CFRulesView_DeleteCancelWithN(t *testing.T) {
 	if m.cfDeleteConfirm {
 		t.Fatalf("expected cfDeleteConfirm cleared after n")
 	}
-	if m.LastAction != "delete cf rule cancelled" {
+	if m.LastAction != "delete mail account cancelled" {
 		t.Fatalf("expected cancelled action, got %q", m.LastAction)
 	}
 }
 
-func TestModel_CFRulesView_DeleteCancelWithEsc(t *testing.T) {
+func TestModel_MailAccount_DeleteCancelWithEsc(t *testing.T) {
 	m := NewModel()
-	m.ActivePanel = PanelAliases
-	m.showCFRules = true
+	m.ActivePanel = PanelMailAccount
 	m.cfDeleteConfirm = true
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
@@ -1100,11 +988,10 @@ func TestModel_CFRulesView_DeleteCancelWithEsc(t *testing.T) {
 	}
 }
 
-func TestModel_CFRulesView_DeleteError(t *testing.T) {
+func TestModel_MailAccount_DeleteError(t *testing.T) {
 	fakeRules := &fakeRulesManager{deleteErr: errors.New("cf api error")}
 	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
-	m.ActivePanel = PanelAliases
-	m.showCFRules = true
+	m.ActivePanel = PanelMailAccount
 	m.cfRules = []ports.RoutingRule{
 		{ID: "r1", Name: "rule1", AliasEmail: "a@example.com"},
 	}
@@ -1117,7 +1004,7 @@ func TestModel_CFRulesView_DeleteError(t *testing.T) {
 
 	updated, _ = m.Update(msg)
 	m = updated.(Model)
-	if !contains(m.ErrorMsg, "delete cf rule failed") {
+	if !contains(m.ErrorMsg, "delete mail account failed") {
 		t.Fatalf("expected delete error message, got %q", m.ErrorMsg)
 	}
 	if m.cfDeleteConfirm {
@@ -1125,10 +1012,9 @@ func TestModel_CFRulesView_DeleteError(t *testing.T) {
 	}
 }
 
-func TestModel_CFRulesView_DeleteInvalidSelection(t *testing.T) {
+func TestModel_MailAccount_DeleteInvalidSelection(t *testing.T) {
 	m := NewModel()
-	m.ActivePanel = PanelAliases
-	m.showCFRules = true
+	m.ActivePanel = PanelMailAccount
 	m.cfDeleteConfirm = true
 	m.cfSelected = 9
 	m.cfRules = []ports.RoutingRule{{ID: "r1"}}
@@ -1141,55 +1027,51 @@ func TestModel_CFRulesView_DeleteInvalidSelection(t *testing.T) {
 	if m.cfDeleteConfirm {
 		t.Fatalf("expected cfDeleteConfirm cleared")
 	}
-	if !contains(m.ErrorMsg, "invalid cf rule selection") {
+	if !contains(m.ErrorMsg, "invalid mail account selection") {
 		t.Fatalf("expected invalid selection error, got %q", m.ErrorMsg)
 	}
 }
 
-func TestModel_CFRulesView_ToggleNoRules(t *testing.T) {
+func TestModel_MailAccount_ToggleNoRules(t *testing.T) {
 	m := NewModel()
-	m.ActivePanel = PanelAliases
-	m.showCFRules = true
+	m.ActivePanel = PanelMailAccount
 	m.cfRules = nil
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	m = updated.(Model)
-	if m.LastAction != "no cf rule to toggle" {
-		t.Fatalf("expected no cf rule to toggle, got %q", m.LastAction)
+	if m.LastAction != "no mail account to toggle" {
+		t.Fatalf("expected no mail account to toggle, got %q", m.LastAction)
 	}
 }
 
-func TestModel_CFRulesView_DeleteNoRules(t *testing.T) {
+func TestModel_MailAccount_DeleteNoRules(t *testing.T) {
 	m := NewModel()
-	m.ActivePanel = PanelAliases
-	m.showCFRules = true
+	m.ActivePanel = PanelMailAccount
 	m.cfRules = nil
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	m = updated.(Model)
-	if m.LastAction != "no cf rule to delete" {
-		t.Fatalf("expected no cf rule to delete, got %q", m.LastAction)
+	if m.LastAction != "no mail account to delete" {
+		t.Fatalf("expected no mail account to delete, got %q", m.LastAction)
 	}
 }
 
-func TestModel_CFRulesView_CtrlCQuits(t *testing.T) {
+func TestModel_MailAccount_CtrlCQuits(t *testing.T) {
 	m := NewModel()
-	m.ActivePanel = PanelAliases
-	m.showCFRules = true
+	m.ActivePanel = PanelMailAccount
 
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	if cmd == nil {
-		t.Fatalf("expected quit command for ctrl+c in cf rules view")
+		t.Fatalf("expected quit command for ctrl+c in mail account view")
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
-		t.Fatalf("expected tea.QuitMsg from ctrl+c in cf rules view")
+		t.Fatalf("expected tea.QuitMsg from ctrl+c in mail account view")
 	}
 }
 
-func TestModel_CFRulesView_RenderShowsCFRules(t *testing.T) {
+func TestModel_MailAccount_RenderShowsMailAccounts(t *testing.T) {
 	m := NewModelWithConfig(ModelConfig{})
-	m.ActivePanel = PanelAliases
-	m.showCFRules = true
+	m.ActivePanel = PanelMailAccount
 	m.cfRules = []ports.RoutingRule{
 		{ID: "r1", Name: "rule1", Enabled: true, AliasEmail: "shop@example.com"},
 		{ID: "r2", Name: "rule2", Enabled: false, AliasEmail: "bank@example.com"},
@@ -1198,21 +1080,20 @@ func TestModel_CFRulesView_RenderShowsCFRules(t *testing.T) {
 	m.Height = 40
 
 	v := m.View()
-	if !contains(v, "CF Rules") {
-		t.Fatalf("expected CF Rules title in view")
+	if !contains(v, "Mail Account") {
+		t.Fatalf("expected Mail Account title in view")
 	}
 	if !contains(v, "shop@example.com") {
-		t.Fatalf("expected shop@example.com in cf rules view")
+		t.Fatalf("expected shop@example.com in mail account view")
 	}
 	if !contains(v, "bank@example.com") {
-		t.Fatalf("expected bank@example.com in cf rules view")
+		t.Fatalf("expected bank@example.com in mail account view")
 	}
 }
 
-func TestModel_CFRulesView_RenderShowsDeleteConfirm(t *testing.T) {
+func TestModel_MailAccount_RenderShowsDeleteConfirm(t *testing.T) {
 	m := NewModelWithConfig(ModelConfig{})
-	m.ActivePanel = PanelAliases
-	m.showCFRules = true
+	m.ActivePanel = PanelMailAccount
 	m.cfDeleteConfirm = true
 	m.cfRules = []ports.RoutingRule{
 		{ID: "r1", Name: "rule1", AliasEmail: "shop@example.com"},
@@ -1221,7 +1102,7 @@ func TestModel_CFRulesView_RenderShowsDeleteConfirm(t *testing.T) {
 	m.Height = 40
 
 	v := m.View()
-	if !contains(v, "Delete CF Rule?") {
+	if !contains(v, "Delete Mail Account?") {
 		t.Fatalf("expected delete confirm in view")
 	}
 	if !contains(v, "shop@example.com") {
@@ -1229,53 +1110,51 @@ func TestModel_CFRulesView_RenderShowsDeleteConfirm(t *testing.T) {
 	}
 }
 
-func TestModel_CFRulesView_RenderEmptyState(t *testing.T) {
+func TestModel_MailAccount_RenderEmptyState(t *testing.T) {
 	m := NewModelWithConfig(ModelConfig{})
-	m.ActivePanel = PanelAliases
-	m.showCFRules = true
+	m.ActivePanel = PanelMailAccount
 	m.cfRules = nil
 	m.Width = 120
 	m.Height = 40
 
 	v := m.View()
-	if !contains(v, "no cf routing rules found") {
+	if !contains(v, "no mail accounts") {
 		t.Fatalf("expected empty state message in view")
 	}
 }
 
-func TestModel_CFRulesView_SKeyUnavailableWithoutManager(t *testing.T) {
-	m := NewModelWithConfig(ModelConfig{AliasManager: &fakeAliasManager{}})
-	m.ActivePanel = PanelAliases
+func TestModel_MailAccount_NewKeyUnavailableWithoutManager(t *testing.T) {
+	m := NewModelWithConfig(ModelConfig{})
+	m.ActivePanel = PanelMailAccount
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
 	m = updated.(Model)
-	if m.showCFRules {
-		t.Fatalf("expected showCFRules=false when rules manager is nil")
+	if m.creating {
+		t.Fatalf("expected creating=false when rules manager is nil")
 	}
 	if !contains(m.ErrorMsg, "rules manager unavailable") {
 		t.Fatalf("expected rules manager unavailable error, got %q", m.ErrorMsg)
 	}
 }
 
-func TestModel_CFRulesView_RefreshWithRKey(t *testing.T) {
+func TestModel_MailAccount_RefreshWithRKey(t *testing.T) {
 	fakeRules := &fakeRulesManager{listResult: []ports.RoutingRule{
 		{ID: "r1", Name: "rule1", Enabled: true, AliasEmail: "a@example.com"},
 	}}
 	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
-	m.ActivePanel = PanelAliases
-	m.showCFRules = true
+	m.ActivePanel = PanelMailAccount
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	m = updated.(Model)
 	if cmd == nil {
 		t.Fatalf("expected refresh command on r key")
 	}
-	if !contains(m.LastAction, "refreshing cf rules") {
+	if !contains(m.LastAction, "refreshing mail accounts") {
 		t.Fatalf("expected refreshing action, got %q", m.LastAction)
 	}
 }
 
-func TestModel_CFRulesView_FitsWithinTerminalHeight(t *testing.T) {
+func TestModel_MailAccount_FitsWithinTerminalHeight(t *testing.T) {
 	rules := make([]ports.RoutingRule, 20)
 	for i := range rules {
 		rules[i] = ports.RoutingRule{
@@ -1296,29 +1175,398 @@ func TestModel_CFRulesView_FitsWithinTerminalHeight(t *testing.T) {
 		m := NewModel()
 		m.Width = sz.w
 		m.Height = sz.h
-		m.ActivePanel = PanelAliases
-		m.showCFRules = true
+		m.ActivePanel = PanelMailAccount
 		m.cfRules = rules
 
 		output := m.View()
 		renderedH := strings.Count(output, "\n") + 1
 		if renderedH > sz.h {
-			t.Errorf("CF rules view at %dx%d rendered %d lines, exceeds %d",
+			t.Errorf("Mail account view at %dx%d rendered %d lines, exceeds %d",
 				sz.w, sz.h, renderedH, sz.h)
 		}
 	}
 }
 
-func TestModel_CFRuleUpdated_EnabledStatus(t *testing.T) {
+func TestModel_MailAccountUpdated_EnabledStatus(t *testing.T) {
 	fakeRules := &fakeRulesManager{listResult: []ports.RoutingRule{}}
 	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
 
 	updated, cmd := m.Update(cfRuleUpdatedMsg{rule: ports.RoutingRule{ID: "r1", Enabled: true}})
 	m = updated.(Model)
-	if m.LastAction != "cf rule enabled" {
-		t.Fatalf("expected cf rule enabled action, got %q", m.LastAction)
+	if m.LastAction != "mail account enabled" {
+		t.Fatalf("expected mail account enabled action, got %q", m.LastAction)
 	}
 	if cmd == nil {
 		t.Fatalf("expected refresh command after toggle")
+	}
+}
+
+// ── fakeLogBuffer ────────────────────────────────────────────────────────────
+
+type fakeLogBuffer struct {
+	lines []string
+	seq   uint64
+}
+
+func (f *fakeLogBuffer) Lines() []string {
+	out := make([]string, len(f.lines))
+	copy(out, f.lines)
+	return out
+}
+
+func (f *fakeLogBuffer) Seq() uint64 {
+	return f.seq
+}
+
+// ── Logs panel tests ─────────────────────────────────────────────────────────
+
+func TestModel_LogTickMsg_UpdatesLinesOnSeqChange(t *testing.T) {
+	buf := &fakeLogBuffer{
+		lines: []string{`{"ts":"2026-02-19T00:00:00Z","level":"info","event":"app.start","msg":"started"}`},
+		seq:   1,
+	}
+	m := NewModelWithConfig(ModelConfig{LogBuffer: buf})
+
+	updated, cmd := m.Update(logTickMsg{})
+	m = updated.(Model)
+
+	if len(m.logLines) != 1 {
+		t.Fatalf("expected 1 log line, got %d", len(m.logLines))
+	}
+	if m.logSeq != 1 {
+		t.Fatalf("expected logSeq=1, got %d", m.logSeq)
+	}
+	if cmd == nil {
+		t.Fatalf("expected tick command to be re-scheduled")
+	}
+}
+
+func TestModel_LogTickMsg_SkipsWhenSeqUnchanged(t *testing.T) {
+	buf := &fakeLogBuffer{
+		lines: []string{`{"ts":"2026-02-19T00:00:00Z","level":"info","event":"app.start","msg":"started"}`},
+		seq:   5,
+	}
+	m := NewModelWithConfig(ModelConfig{LogBuffer: buf})
+	m.logSeq = 5 // already up to date
+	m.logLines = []string{"old line"}
+
+	updated, cmd := m.Update(logTickMsg{})
+	m = updated.(Model)
+
+	// logLines should NOT be updated since seq didn't change
+	if len(m.logLines) != 1 || m.logLines[0] != "old line" {
+		t.Fatalf("expected logLines unchanged when seq matches, got %v", m.logLines)
+	}
+	if cmd == nil {
+		t.Fatalf("expected tick command to be re-scheduled even when no change")
+	}
+}
+
+func TestModel_LogTickMsg_NilBufferSafe(t *testing.T) {
+	m := NewModel() // no log buffer
+
+	updated, cmd := m.Update(logTickMsg{})
+	m = updated.(Model)
+
+	if len(m.logLines) != 0 {
+		t.Fatalf("expected no log lines with nil buffer")
+	}
+	if cmd != nil {
+		t.Fatalf("expected nil command with nil buffer")
+	}
+}
+
+func TestModel_LogsPanel_ScrollUpDown(t *testing.T) {
+	buf := &fakeLogBuffer{seq: 1}
+	m := NewModelWithConfig(ModelConfig{LogBuffer: buf})
+	m.ActivePanel = PanelLogs
+	m.logLines = make([]string, 20)
+	for i := range m.logLines {
+		m.logLines[i] = fmt.Sprintf("line %d", i)
+	}
+	m.logAutoScroll = true
+
+	// Scroll up
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m = updated.(Model)
+	if m.logScroll != 1 {
+		t.Fatalf("expected logScroll=1 after k, got %d", m.logScroll)
+	}
+	if m.logAutoScroll {
+		t.Fatalf("expected logAutoScroll=false after scrolling up")
+	}
+
+	// Scroll up again with arrow key
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(Model)
+	if m.logScroll != 2 {
+		t.Fatalf("expected logScroll=2 after up, got %d", m.logScroll)
+	}
+
+	// Scroll down
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = updated.(Model)
+	if m.logScroll != 1 {
+		t.Fatalf("expected logScroll=1 after j, got %d", m.logScroll)
+	}
+
+	// Scroll down again with arrow key
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.logScroll != 0 {
+		t.Fatalf("expected logScroll=0 after down, got %d", m.logScroll)
+	}
+	if !m.logAutoScroll {
+		t.Fatalf("expected logAutoScroll=true when scrolled to bottom")
+	}
+}
+
+func TestModel_LogsPanel_GJumpToBottom(t *testing.T) {
+	buf := &fakeLogBuffer{seq: 1}
+	m := NewModelWithConfig(ModelConfig{LogBuffer: buf})
+	m.ActivePanel = PanelLogs
+	m.logLines = make([]string, 20)
+	m.logScroll = 10
+	m.logAutoScroll = false
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	m = updated.(Model)
+
+	if m.logScroll != 0 {
+		t.Fatalf("expected logScroll=0 after G, got %d", m.logScroll)
+	}
+	if !m.logAutoScroll {
+		t.Fatalf("expected logAutoScroll=true after G")
+	}
+}
+
+func TestModel_LogsPanel_ScrollClampAtMax(t *testing.T) {
+	buf := &fakeLogBuffer{seq: 1}
+	m := NewModelWithConfig(ModelConfig{LogBuffer: buf})
+	m.ActivePanel = PanelLogs
+	m.logLines = []string{"line1", "line2", "line3"}
+
+	// maxScroll = len(logLines) - 1 = 2; first line always visible
+	m.logScroll = 2
+
+	// Try to scroll up past max
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(Model)
+	if m.logScroll != 2 {
+		t.Fatalf("expected logScroll clamped at 2, got %d", m.logScroll)
+	}
+
+	// Try to scroll down below 0
+	m.logScroll = 0
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.logScroll != 0 {
+		t.Fatalf("expected logScroll clamped at 0, got %d", m.logScroll)
+	}
+}
+
+func TestModel_Init_StartsLogTick(t *testing.T) {
+	buf := &fakeLogBuffer{}
+	m := NewModelWithConfig(ModelConfig{LogBuffer: buf})
+
+	cmd := m.Init()
+	if cmd == nil {
+		t.Fatalf("expected init command when log buffer configured")
+	}
+}
+
+func TestModel_LogsPanel_ViewRendersLines(t *testing.T) {
+	m := NewModelWithConfig(ModelConfig{})
+	m.logLines = []string{
+		`{"ts":"2026-02-19T10:30:00Z","level":"info","event":"app.start","msg":"application started"}`,
+		`{"ts":"2026-02-19T10:30:01Z","level":"warn","event":"db.slow","msg":"slow query detected"}`,
+		`{"ts":"2026-02-19T10:30:02Z","level":"error","event":"net.fail","msg":"connection refused"}`,
+	}
+	m.Width = 120
+	m.Height = 40
+
+	v := m.View()
+	if !contains(v, "INF") {
+		t.Fatalf("expected INF level in logs view")
+	}
+	if !contains(v, "WRN") {
+		t.Fatalf("expected WRN level in logs view")
+	}
+	if !contains(v, "ERR") {
+		t.Fatalf("expected ERR level in logs view")
+	}
+	if !contains(v, "app.start") {
+		t.Fatalf("expected app.start event in logs view")
+	}
+}
+
+func TestModel_LogsPanel_ViewShowsEmptyState(t *testing.T) {
+	m := NewModelWithConfig(ModelConfig{})
+	m.logLines = nil
+	m.Width = 120
+	m.Height = 40
+
+	v := m.View()
+	if !contains(v, "waiting for log output") {
+		t.Fatalf("expected empty state message in logs view")
+	}
+}
+
+func TestModel_FormatLogLine_ParsesJSONL(t *testing.T) {
+	th := newTheme()
+
+	// Valid JSONL info line
+	line := `{"ts":"2026-02-19T10:30:00Z","level":"info","event":"app.start","msg":"started ok"}`
+	result := formatLogLine(line, th, 100)
+	if !contains(result, "10:30:00") {
+		t.Fatalf("expected formatted timestamp in output, got %q", result)
+	}
+	if !contains(result, "INF") {
+		t.Fatalf("expected INF level in output, got %q", result)
+	}
+	if !contains(result, "app.start") {
+		t.Fatalf("expected event in output, got %q", result)
+	}
+	if !contains(result, "started ok") {
+		t.Fatalf("expected message in output, got %q", result)
+	}
+
+	// Error level
+	errLine := `{"ts":"2026-02-19T10:30:00Z","level":"error","event":"db.fail","msg":"timeout"}`
+	errResult := formatLogLine(errLine, th, 100)
+	if !contains(errResult, "ERR") {
+		t.Fatalf("expected ERR level, got %q", errResult)
+	}
+
+	// Warn level
+	warnLine := `{"ts":"2026-02-19T10:30:00Z","level":"warn","event":"cache.miss","msg":"stale"}`
+	warnResult := formatLogLine(warnLine, th, 100)
+	if !contains(warnResult, "WRN") {
+		t.Fatalf("expected WRN level, got %q", warnResult)
+	}
+
+	// Invalid JSON fallback
+	rawLine := "not json at all"
+	rawResult := formatLogLine(rawLine, th, 100)
+	if !contains(rawResult, "not json at all") {
+		t.Fatalf("expected raw line in output for invalid JSON, got %q", rawResult)
+	}
+
+	// Zero width
+	zeroResult := formatLogLine(line, th, 0)
+	if zeroResult != "" {
+		t.Fatalf("expected empty string for zero maxW, got %q", zeroResult)
+	}
+}
+
+func TestModel_LKey_SwitchesToLogsPanel(t *testing.T) {
+	m := NewModel()
+	m.ActivePanel = PanelStatus
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	m = updated.(Model)
+
+	if m.ActivePanel != PanelLogs {
+		t.Fatalf("expected PanelLogs after l key, got %v", m.ActivePanel)
+	}
+	if m.LastAction != "logs panel" {
+		t.Fatalf("expected logs panel action, got %q", m.LastAction)
+	}
+	if cmd != nil {
+		t.Fatalf("expected nil command for l key")
+	}
+}
+
+func TestModel_LogsPanel_CtrlCQuits(t *testing.T) {
+	m := NewModel()
+	m.ActivePanel = PanelLogs
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatalf("expected quit command for ctrl+c in logs panel")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("expected tea.QuitMsg from ctrl+c in logs panel")
+	}
+}
+
+func TestModel_View_FitsWithinTerminalHeight_WithLogLines(t *testing.T) {
+	sizes := []struct{ w, h int }{
+		{120, 40},
+		{80, 24},
+		{200, 60},
+		{40, 12},
+	}
+
+	makeLogLines := func() []string {
+		lines := make([]string, 10)
+		for i := range lines {
+			lines[i] = fmt.Sprintf(`{"ts":"2026-02-19T10:%02d:00Z","level":"info","event":"test.evt%d","msg":"log entry %d"}`, i, i, i)
+		}
+		return lines
+	}
+
+	for _, sz := range sizes {
+		m := NewModel()
+		m.Width = sz.w
+		m.Height = sz.h
+		m.logLines = makeLogLines()
+
+		output := m.View()
+		renderedH := strings.Count(output, "\n") + 1
+		if renderedH > sz.h {
+			t.Errorf("View (with log lines) at %dx%d rendered %d lines, exceeds %d",
+				sz.w, sz.h, renderedH, sz.h)
+		}
+	}
+}
+
+func TestModel_LogTickMsg_AutoScrollResetsScrollToZero(t *testing.T) {
+	buf := &fakeLogBuffer{
+		lines: []string{"line1", "line2", "line3"},
+		seq:   3,
+	}
+	m := NewModelWithConfig(ModelConfig{LogBuffer: buf})
+	m.logAutoScroll = true
+	m.logScroll = 2 // scrolled up, but auto-scroll is on
+
+	updated, _ := m.Update(logTickMsg{})
+	m = updated.(Model)
+
+	if m.logScroll != 0 {
+		t.Fatalf("expected logScroll reset to 0 with auto-scroll, got %d", m.logScroll)
+	}
+}
+
+func TestModel_LogsPanel_HelpShowsLogKeys(t *testing.T) {
+	m := NewModel()
+	m.ShowHelp = true
+	m.Width = 120
+	m.Height = 60
+
+	v := m.View()
+	if !contains(v, "jump to Logs panel") {
+		t.Fatalf("expected 'l' key help entry for logs panel")
+	}
+	if !contains(v, "jump to bottom") {
+		t.Fatalf("expected 'G' key help entry for jump to bottom")
+	}
+}
+
+func TestModel_LogsPanel_FooterShowsLogKey(t *testing.T) {
+	m := NewModel()
+	m.Width = 120
+	m.Height = 40
+
+	v := m.View()
+	if !contains(v, "logs") {
+		t.Fatalf("expected 'logs' in footer keys")
+	}
+}
+
+func TestModel_NewModelWithConfig_LogAutoScrollDefault(t *testing.T) {
+	m := NewModel()
+	if !m.logAutoScroll {
+		t.Fatalf("expected logAutoScroll=true by default")
 	}
 }

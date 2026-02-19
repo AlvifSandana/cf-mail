@@ -32,8 +32,8 @@ func TestSmoke_TUIKeyTransitions(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = updated.(Model)
-	if m.ActivePanel != PanelAliases {
-		t.Fatalf("expected aliases panel, got %v", m.ActivePanel)
+	if m.ActivePanel != PanelMailAccount {
+		t.Fatalf("expected mail account panel, got %v", m.ActivePanel)
 	}
 
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})

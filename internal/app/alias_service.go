@@ -228,6 +228,41 @@ func (s *AliasService) UpdateRoutingRule(ctx context.Context, in ports.UpdateRou
 	return rule, nil
 }
 
+// CreateRoutingRuleDirect creates a CF routing rule directly via the CF API,
+// without storing anything in the local database.
+func (s *AliasService) CreateRoutingRuleDirect(ctx context.Context, in ports.CreateRoutingRuleInput) (ports.RoutingRule, error) {
+	if s == nil {
+		return ports.RoutingRule{}, domain.WrapValidation("alias service is nil", nil)
+	}
+
+	in.AliasEmail = strings.ToLower(strings.TrimSpace(in.AliasEmail))
+	if in.AliasEmail == "" {
+		return ports.RoutingRule{}, domain.WrapValidation("alias email is required", nil)
+	}
+	if _, err := parseAddress(in.AliasEmail); err != nil {
+		return ports.RoutingRule{}, domain.WrapValidation("invalid alias email", err)
+	}
+
+	if len(in.Destination) == 0 {
+		// Use the configured destination email as default.
+		in.Destination = []string{s.destinationEmail}
+	}
+
+	if strings.TrimSpace(in.Name) == "" {
+		// Build a default rule name from alias email local part.
+		parts := strings.SplitN(in.AliasEmail, "@", 2)
+		localPart := parts[0]
+		in.Name = buildRuleName(s.ruleNamePrefix, "", localPart)
+	}
+
+	rule, err := s.cf.CreateRoutingRule(ctx, in)
+	if err != nil {
+		return ports.RoutingRule{}, domain.WrapDependency("create routing rule direct", err)
+	}
+
+	return rule, nil
+}
+
 // DeleteRoutingRuleByID deletes a CF routing rule by its CF rule ID directly,
 // without requiring the rule to exist in the local database.
 func (s *AliasService) DeleteRoutingRuleByID(ctx context.Context, ruleID string) error {

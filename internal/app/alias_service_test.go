@@ -483,6 +483,141 @@ func TestAliasService_UpdateRoutingRule_Error(t *testing.T) {
 	}
 }
 
+func TestAliasService_CreateRoutingRuleDirect_Success(t *testing.T) {
+	cf := &fakeCloudflare{
+		createResult: ports.RoutingRule{ID: "r-new", Name: "tuiotp:shop", Enabled: true, AliasEmail: "shop@example.com", Destination: []string{"inbox@example.com"}},
+	}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(cf, repo, AliasServiceConfig{DestinationEmail: "inbox@example.com", AliasDomain: "example.com"})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	rule, err := svc.CreateRoutingRuleDirect(context.Background(), ports.CreateRoutingRuleInput{
+		AliasEmail: "shop@example.com",
+		Enabled:    true,
+	})
+	if err != nil {
+		t.Fatalf("CreateRoutingRuleDirect() error = %v", err)
+	}
+	if rule.ID != "r-new" {
+		t.Fatalf("expected rule ID r-new, got %q", rule.ID)
+	}
+	if cf.createCalls != 1 {
+		t.Fatalf("expected 1 create call, got %d", cf.createCalls)
+	}
+	// Should use configured destination email
+	if len(cf.lastCreateInput.Destination) != 1 || cf.lastCreateInput.Destination[0] != "inbox@example.com" {
+		t.Fatalf("expected default destination, got %v", cf.lastCreateInput.Destination)
+	}
+	// Should auto-build rule name from local part
+	if cf.lastCreateInput.Name != "tuiotp:shop" {
+		t.Fatalf("expected auto-built rule name tuiotp:shop, got %q", cf.lastCreateInput.Name)
+	}
+	// Should NOT touch the repo at all
+	if repo.createCalls != 0 {
+		t.Fatalf("expected no repo create call for direct rule, got %d", repo.createCalls)
+	}
+}
+
+func TestAliasService_CreateRoutingRuleDirect_MissingEmailRejected(t *testing.T) {
+	cf := &fakeCloudflare{}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(cf, repo, AliasServiceConfig{DestinationEmail: "inbox@example.com", AliasDomain: "example.com"})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	_, err = svc.CreateRoutingRuleDirect(context.Background(), ports.CreateRoutingRuleInput{})
+	if err == nil || !strings.Contains(err.Error(), "alias email is required") {
+		t.Fatalf("expected alias email required error, got %v", err)
+	}
+	if cf.createCalls != 0 {
+		t.Fatalf("expected no create call, got %d", cf.createCalls)
+	}
+}
+
+func TestAliasService_CreateRoutingRuleDirect_InvalidEmailRejected(t *testing.T) {
+	cf := &fakeCloudflare{}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(cf, repo, AliasServiceConfig{DestinationEmail: "inbox@example.com", AliasDomain: "example.com"})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	_, err = svc.CreateRoutingRuleDirect(context.Background(), ports.CreateRoutingRuleInput{
+		AliasEmail: "not-valid-email",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid alias email") {
+		t.Fatalf("expected invalid email error, got %v", err)
+	}
+}
+
+func TestAliasService_CreateRoutingRuleDirect_Error(t *testing.T) {
+	cf := &fakeCloudflare{createErr: errors.New("cf create failed")}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(cf, repo, AliasServiceConfig{DestinationEmail: "inbox@example.com", AliasDomain: "example.com"})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	_, err = svc.CreateRoutingRuleDirect(context.Background(), ports.CreateRoutingRuleInput{
+		AliasEmail: "shop@example.com",
+	})
+	if err == nil {
+		t.Fatalf("expected error from CreateRoutingRuleDirect")
+	}
+	if !strings.Contains(err.Error(), "create routing rule direct") {
+		t.Fatalf("expected wrapped error, got %v", err)
+	}
+}
+
+func TestAliasService_CreateRoutingRuleDirect_CustomDestinationPreserved(t *testing.T) {
+	cf := &fakeCloudflare{}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(cf, repo, AliasServiceConfig{DestinationEmail: "inbox@example.com", AliasDomain: "example.com"})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	_, err = svc.CreateRoutingRuleDirect(context.Background(), ports.CreateRoutingRuleInput{
+		AliasEmail:  "shop@example.com",
+		Destination: []string{"custom@example.com"},
+	})
+	if err != nil {
+		t.Fatalf("CreateRoutingRuleDirect() error = %v", err)
+	}
+	if len(cf.lastCreateInput.Destination) != 1 || cf.lastCreateInput.Destination[0] != "custom@example.com" {
+		t.Fatalf("expected custom destination preserved, got %v", cf.lastCreateInput.Destination)
+	}
+}
+
+func TestAliasService_CreateRoutingRuleDirect_CustomNamePreserved(t *testing.T) {
+	cf := &fakeCloudflare{}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(cf, repo, AliasServiceConfig{DestinationEmail: "inbox@example.com", AliasDomain: "example.com"})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	_, err = svc.CreateRoutingRuleDirect(context.Background(), ports.CreateRoutingRuleInput{
+		AliasEmail: "shop@example.com",
+		Name:       "my-custom-rule",
+	})
+	if err != nil {
+		t.Fatalf("CreateRoutingRuleDirect() error = %v", err)
+	}
+	if cf.lastCreateInput.Name != "my-custom-rule" {
+		t.Fatalf("expected custom name preserved, got %q", cf.lastCreateInput.Name)
+	}
+}
+
 func TestAliasService_DeleteRoutingRuleByID_Success(t *testing.T) {
 	cf := &fakeCloudflare{}
 	repo := &fakeAliasRepo{}
