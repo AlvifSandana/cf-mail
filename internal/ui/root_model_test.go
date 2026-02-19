@@ -56,8 +56,8 @@ func TestNewModel_DefaultState(t *testing.T) {
 	if m.ShowHelp {
 		t.Fatalf("expected help hidden by default")
 	}
-	if m.LastAction != "ready" {
-		t.Fatalf("unexpected default last action: %q", m.LastAction)
+	if m.toast != nil {
+		t.Fatalf("expected no initial toast, got %+v", m.toast)
 	}
 	if m.opTimeout != 5*time.Second {
 		t.Fatalf("expected default op timeout 5s, got %v", m.opTimeout)
@@ -94,11 +94,11 @@ func TestModel_Update_GlobalKeymaps(t *testing.T) {
 
 	updated, cmd = m1.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	m2 := updated.(Model)
-	if m2.LastAction != "refresh requested" {
-		t.Fatalf("expected refresh action label, got %q", m2.LastAction)
+	if m2.toast == nil || m2.toast.Message != "refreshing..." {
+		t.Fatalf("expected toast 'refreshing...', got %+v", m2.toast)
 	}
-	if cmd != nil {
-		t.Fatalf("expected nil command for refresh")
+	if cmd == nil {
+		t.Fatalf("expected non-nil command for refresh (toast batch)")
 	}
 
 	updated, cmd = m2.Update(tea.KeyMsg{Type: tea.KeyTab})
@@ -322,7 +322,7 @@ func TestModel_OTPPanel_ClearFilterByEsc(t *testing.T) {
 		t.Fatalf("expected query cleared")
 	}
 
-	msg := cmd()
+	msg := runBatchExtract(cmd)
 	loaded, ok := msg.(otpHistoryLoadedMsg)
 	if !ok || loaded.query != "" {
 		t.Fatalf("expected cleared-query otpHistoryLoadedMsg, got %#v", msg)
@@ -363,16 +363,16 @@ func TestModel_OTPPanel_CopyHotkeySuccess(t *testing.T) {
 	if cmd == nil {
 		t.Fatalf("expected copy command")
 	}
-	updated, _ = m.Update(cmd())
+	updated, _ = m.Update(runBatchExtract(cmd))
 	m = updated.(Model)
 	if clip.calls != 1 || clip.lastText != "123456" {
 		t.Fatalf("expected clipboard copy with otp code, calls=%d text=%q", clip.calls, clip.lastText)
 	}
-	if m.LastAction != "otp copied" {
-		t.Fatalf("expected otp copied action, got %q", m.LastAction)
+	if m.toast == nil || m.toast.Message != "otp copied" {
+		t.Fatalf("expected toast 'otp copied', got %+v", m.toast)
 	}
-	if m.ErrorMsg != "" {
-		t.Fatalf("expected no error after successful copy, got %q", m.ErrorMsg)
+	if m.toast.Level != ToastSuccess {
+		t.Fatalf("expected ToastSuccess level, got %v", m.toast.Level)
 	}
 }
 
@@ -383,8 +383,8 @@ func TestModel_OTPPanel_CopyHotkeyUnavailable(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	m = updated.(Model)
-	if m.LastAction != "clipboard unavailable" {
-		t.Fatalf("expected clipboard unavailable action, got %q", m.LastAction)
+	if m.toast == nil || m.toast.Message != "clipboard unavailable" {
+		t.Fatalf("expected toast 'clipboard unavailable', got %+v", m.toast)
 	}
 }
 
@@ -399,16 +399,16 @@ func TestModel_OTPPanel_CopyHotkeyError(t *testing.T) {
 	if cmd == nil {
 		t.Fatalf("expected copy command")
 	}
-	updated, _ = m.Update(cmd())
+	updated, _ = m.Update(runBatchExtract(cmd))
 	m = updated.(Model)
-	if m.LastAction != "copy otp failed" {
-		t.Fatalf("expected copy otp failed action, got %q", m.LastAction)
+	if m.toast == nil || !contains(m.toast.Message, "copy otp failed") {
+		t.Fatalf("expected toast containing 'copy otp failed', got %+v", m.toast)
 	}
-	if !contains(m.ErrorMsg, "copy otp failed") {
-		t.Fatalf("expected sanitized copy error message, got %q", m.ErrorMsg)
+	if m.toast.Level != ToastError {
+		t.Fatalf("expected ToastError level, got %v", m.toast.Level)
 	}
-	if contains(m.ErrorMsg, "detail") {
-		t.Fatalf("expected no raw error detail leakage, got %q", m.ErrorMsg)
+	if contains(m.toast.Message, "detail") {
+		t.Fatalf("expected no raw error detail leakage, got %q", m.toast.Message)
 	}
 }
 
@@ -424,7 +424,7 @@ func TestModel_OTPPanel_CopyHotkeyNilContextSafe(t *testing.T) {
 	if cmd == nil {
 		t.Fatalf("expected copy command")
 	}
-	updated, _ = m.Update(cmd())
+	updated, _ = m.Update(runBatchExtract(cmd))
 	m = updated.(Model)
 	if clip.calls != 1 || clip.lastText != "555555" {
 		t.Fatalf("expected copy called with otp text, calls=%d text=%q", clip.calls, clip.lastText)
@@ -445,9 +445,6 @@ func TestModel_Update_RuntimeWatcherEvent_RefreshesLiveMailboxHealth(t *testing.
 
 	if m.health.Mailbox == "configured" {
 		t.Fatalf("expected mailbox health to update from runtime watcher event")
-	}
-	if !contains(strings.ToLower(m.LastAction), "mailbox") {
-		t.Fatalf("expected last action to mention mailbox runtime update, got %q", m.LastAction)
 	}
 }
 
@@ -530,6 +527,29 @@ func TestTrimLastRune_UnicodeSafe(t *testing.T) {
 
 func contains(s, sub string) bool {
 	return strings.Contains(s, sub)
+}
+
+// runBatchExtract executes a cmd; if it returns a tea.BatchMsg, it finds
+// and executes the first non-toast-dismiss sub-command, returning its message.
+func runBatchExtract(cmd tea.Cmd) tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return msg
+	}
+	for _, sub := range batch {
+		if sub == nil {
+			continue
+		}
+		result := sub()
+		if _, isToast := result.(toastDismissMsg); !isToast {
+			return result
+		}
+	}
+	return nil
 }
 
 // ── fakeRulesManager ─────────────────────────────────────────────────────────
@@ -629,8 +649,8 @@ func TestModel_MailAccountLoaded_StoresRulesAndClampsSelection(t *testing.T) {
 	if m.cfSelected != 1 {
 		t.Fatalf("expected cfSelected clamped to 1, got %d", m.cfSelected)
 	}
-	if !contains(m.LastAction, "mail accounts refreshed") {
-		t.Fatalf("expected mail accounts refreshed action, got %q", m.LastAction)
+	if m.toast == nil || !contains(m.toast.Message, "mail accounts refreshed") {
+		t.Fatalf("expected toast containing 'mail accounts refreshed', got %+v", m.toast)
 	}
 }
 
@@ -640,11 +660,8 @@ func TestModel_MailAccountLoaded_Error(t *testing.T) {
 	updated, _ := m.Update(cfRulesLoadedMsg{err: errors.New("cf api down")})
 	m = updated.(Model)
 
-	if !contains(m.ErrorMsg, "refresh mail accounts failed") {
-		t.Fatalf("expected mail accounts error msg, got %q", m.ErrorMsg)
-	}
-	if m.LastAction != "mail accounts refresh failed" {
-		t.Fatalf("expected mail accounts refresh failed action, got %q", m.LastAction)
+	if m.toast == nil || m.toast.Level != ToastError || !contains(m.toast.Message, "refresh mail accounts failed") {
+		t.Fatalf("expected error toast containing 'refresh mail accounts failed', got %+v", m.toast)
 	}
 }
 
@@ -679,7 +696,7 @@ func TestModel_MailAccount_CreateFlow_SubmitAndRefresh(t *testing.T) {
 		t.Fatalf("expected create mail account command on submit")
 	}
 
-	createMsg := cmd()
+	createMsg := runBatchExtract(cmd)
 	created, ok := createMsg.(cfRuleCreatedMsg)
 	if !ok {
 		t.Fatalf("expected cfRuleCreatedMsg, got %T", createMsg)
@@ -706,8 +723,8 @@ func TestModel_MailAccount_CreateFlow_SubmitAndRefresh(t *testing.T) {
 	if cmd == nil {
 		t.Fatalf("expected refresh command after create")
 	}
-	if m.LastAction != "mail account created" {
-		t.Fatalf("expected mail account created action, got %q", m.LastAction)
+	if m.toast == nil || m.toast.Message != "mail account created" {
+		t.Fatalf("expected toast 'mail account created', got %+v", m.toast)
 	}
 }
 
@@ -738,11 +755,11 @@ func TestModel_MailAccount_CreateFlow_EmptyEmail(t *testing.T) {
 	// Submit with empty email
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(Model)
-	if cmd != nil {
-		t.Fatalf("expected no command for empty email submit")
+	if cmd == nil {
+		t.Fatalf("expected toast cmd for validation error")
 	}
-	if !contains(m.ErrorMsg, "email is required") {
-		t.Fatalf("expected email required error, got %q", m.ErrorMsg)
+	if m.toast == nil || !contains(m.toast.Message, "email is required") {
+		t.Fatalf("expected toast containing 'email is required', got %+v", m.toast)
 	}
 }
 
@@ -761,8 +778,8 @@ func TestModel_MailAccount_CreateFlow_CancelWithEsc(t *testing.T) {
 	if m.createAliasEmail != "" {
 		t.Fatalf("expected createAliasEmail cleared after esc")
 	}
-	if m.LastAction != "create mail account cancelled" {
-		t.Fatalf("expected cancelled action, got %q", m.LastAction)
+	if m.toast == nil || m.toast.Message != "create cancelled" {
+		t.Fatalf("expected toast 'create cancelled', got %+v", m.toast)
 	}
 }
 
@@ -778,11 +795,11 @@ func TestModel_MailAccount_CreateFlow_Error(t *testing.T) {
 		t.Fatalf("expected create command")
 	}
 
-	msg := cmd()
+	msg := runBatchExtract(cmd)
 	updated, _ := m.Update(msg)
 	m = updated.(Model)
-	if !contains(m.ErrorMsg, "create mail account failed") {
-		t.Fatalf("expected create error message, got %q", m.ErrorMsg)
+	if m.toast == nil || !contains(m.toast.Message, "create mail account failed") {
+		t.Fatalf("expected toast containing 'create mail account failed', got %+v", m.toast)
 	}
 }
 
@@ -855,12 +872,12 @@ func TestModel_MailAccount_ToggleEnableDisable(t *testing.T) {
 	if cmd == nil {
 		t.Fatalf("expected toggle command")
 	}
-	if !contains(m.LastAction, "disabling") {
-		t.Fatalf("expected disabling action, got %q", m.LastAction)
+	if m.toast == nil || !contains(m.toast.Message, "disabling") {
+		t.Fatalf("expected toast containing 'disabling', got %+v", m.toast)
 	}
 
 	// Execute toggle command
-	msg := cmd()
+	msg := runBatchExtract(cmd)
 	toggleResult, ok := msg.(cfRuleUpdatedMsg)
 	if !ok {
 		t.Fatalf("expected cfRuleUpdatedMsg, got %T", msg)
@@ -881,8 +898,8 @@ func TestModel_MailAccount_ToggleEnableDisable(t *testing.T) {
 	// Process toggle result
 	updated, cmd = m.Update(msg)
 	m = updated.(Model)
-	if m.LastAction != "mail account disabled" {
-		t.Fatalf("expected mail account disabled action, got %q", m.LastAction)
+	if m.toast == nil || m.toast.Message != "mail account disabled" {
+		t.Fatalf("expected toast 'mail account disabled', got %+v", m.toast)
 	}
 	if cmd == nil {
 		t.Fatalf("expected refresh command after toggle")
@@ -899,12 +916,12 @@ func TestModel_MailAccount_ToggleError(t *testing.T) {
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	m = updated.(Model)
-	msg := cmd()
+	msg := runBatchExtract(cmd)
 
 	updated, _ = m.Update(msg)
 	m = updated.(Model)
-	if !contains(m.ErrorMsg, "toggle mail account failed") {
-		t.Fatalf("expected toggle error message, got %q", m.ErrorMsg)
+	if m.toast == nil || !contains(m.toast.Message, "toggle mail account failed") {
+		t.Fatalf("expected toast containing 'toggle mail account failed', got %+v", m.toast)
 	}
 }
 
@@ -935,7 +952,7 @@ func TestModel_MailAccount_DeleteFlow(t *testing.T) {
 	}
 
 	// Execute delete command
-	msg := cmd()
+	msg := runBatchExtract(cmd)
 	deleted, ok := msg.(cfRuleDeletedMsg)
 	if !ok {
 		t.Fatalf("expected cfRuleDeletedMsg, got %T", msg)
@@ -953,8 +970,8 @@ func TestModel_MailAccount_DeleteFlow(t *testing.T) {
 	if m.cfDeleteConfirm {
 		t.Fatalf("expected cfDeleteConfirm cleared after success")
 	}
-	if m.LastAction != "mail account deleted" {
-		t.Fatalf("expected mail account deleted action, got %q", m.LastAction)
+	if m.toast == nil || m.toast.Message != "mail account deleted" {
+		t.Fatalf("expected toast 'mail account deleted', got %+v", m.toast)
 	}
 	if cmd == nil {
 		t.Fatalf("expected refresh command after delete")
@@ -971,8 +988,8 @@ func TestModel_MailAccount_DeleteCancelWithN(t *testing.T) {
 	if m.cfDeleteConfirm {
 		t.Fatalf("expected cfDeleteConfirm cleared after n")
 	}
-	if m.LastAction != "delete mail account cancelled" {
-		t.Fatalf("expected cancelled action, got %q", m.LastAction)
+	if m.toast == nil || m.toast.Message != "delete cancelled" {
+		t.Fatalf("expected toast 'delete cancelled', got %+v", m.toast)
 	}
 }
 
@@ -1000,12 +1017,12 @@ func TestModel_MailAccount_DeleteError(t *testing.T) {
 	m.cfDeleteConfirm = true
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	m = updated.(Model)
-	msg := cmd()
+	msg := runBatchExtract(cmd)
 
 	updated, _ = m.Update(msg)
 	m = updated.(Model)
-	if !contains(m.ErrorMsg, "delete mail account failed") {
-		t.Fatalf("expected delete error message, got %q", m.ErrorMsg)
+	if m.toast == nil || !contains(m.toast.Message, "delete mail account failed") {
+		t.Fatalf("expected toast containing 'delete mail account failed', got %+v", m.toast)
 	}
 	if m.cfDeleteConfirm {
 		t.Fatalf("expected cfDeleteConfirm cleared after error")
@@ -1021,14 +1038,14 @@ func TestModel_MailAccount_DeleteInvalidSelection(t *testing.T) {
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(Model)
-	if cmd != nil {
-		t.Fatalf("expected no command on invalid selection")
+	if cmd == nil {
+		t.Fatalf("expected toast cmd for invalid selection error")
 	}
 	if m.cfDeleteConfirm {
 		t.Fatalf("expected cfDeleteConfirm cleared")
 	}
-	if !contains(m.ErrorMsg, "invalid mail account selection") {
-		t.Fatalf("expected invalid selection error, got %q", m.ErrorMsg)
+	if m.toast == nil || !contains(m.toast.Message, "invalid mail account selection") {
+		t.Fatalf("expected toast containing 'invalid mail account selection', got %+v", m.toast)
 	}
 }
 
@@ -1039,8 +1056,8 @@ func TestModel_MailAccount_ToggleNoRules(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	m = updated.(Model)
-	if m.LastAction != "no mail account to toggle" {
-		t.Fatalf("expected no mail account to toggle, got %q", m.LastAction)
+	if m.toast == nil || m.toast.Message != "no mail account to toggle" {
+		t.Fatalf("expected toast 'no mail account to toggle', got %+v", m.toast)
 	}
 }
 
@@ -1051,8 +1068,8 @@ func TestModel_MailAccount_DeleteNoRules(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	m = updated.(Model)
-	if m.LastAction != "no mail account to delete" {
-		t.Fatalf("expected no mail account to delete, got %q", m.LastAction)
+	if m.toast == nil || m.toast.Message != "no mail account to delete" {
+		t.Fatalf("expected toast 'no mail account to delete', got %+v", m.toast)
 	}
 }
 
@@ -1132,8 +1149,8 @@ func TestModel_MailAccount_NewKeyUnavailableWithoutManager(t *testing.T) {
 	if m.creating {
 		t.Fatalf("expected creating=false when rules manager is nil")
 	}
-	if !contains(m.ErrorMsg, "rules manager unavailable") {
-		t.Fatalf("expected rules manager unavailable error, got %q", m.ErrorMsg)
+	if m.toast == nil || !contains(m.toast.Message, "rules manager unavailable") {
+		t.Fatalf("expected toast containing 'rules manager unavailable', got %+v", m.toast)
 	}
 }
 
@@ -1149,8 +1166,8 @@ func TestModel_MailAccount_RefreshWithRKey(t *testing.T) {
 	if cmd == nil {
 		t.Fatalf("expected refresh command on r key")
 	}
-	if !contains(m.LastAction, "refreshing mail accounts") {
-		t.Fatalf("expected refreshing action, got %q", m.LastAction)
+	if m.toast == nil || !contains(m.toast.Message, "refreshing mail accounts") {
+		t.Fatalf("expected toast containing 'refreshing mail accounts', got %+v", m.toast)
 	}
 }
 
@@ -1193,8 +1210,8 @@ func TestModel_MailAccountUpdated_EnabledStatus(t *testing.T) {
 
 	updated, cmd := m.Update(cfRuleUpdatedMsg{rule: ports.RoutingRule{ID: "r1", Enabled: true}})
 	m = updated.(Model)
-	if m.LastAction != "mail account enabled" {
-		t.Fatalf("expected mail account enabled action, got %q", m.LastAction)
+	if m.toast == nil || m.toast.Message != "mail account enabled" {
+		t.Fatalf("expected toast 'mail account enabled', got %+v", m.toast)
 	}
 	if cmd == nil {
 		t.Fatalf("expected refresh command after toggle")
@@ -1469,9 +1486,6 @@ func TestModel_LKey_SwitchesToLogsPanel(t *testing.T) {
 	if m.ActivePanel != PanelLogs {
 		t.Fatalf("expected PanelLogs after l key, got %v", m.ActivePanel)
 	}
-	if m.LastAction != "logs panel" {
-		t.Fatalf("expected logs panel action, got %q", m.LastAction)
-	}
 	if cmd != nil {
 		t.Fatalf("expected nil command for l key")
 	}
@@ -1568,5 +1582,121 @@ func TestModel_NewModelWithConfig_LogAutoScrollDefault(t *testing.T) {
 	m := NewModel()
 	if !m.logAutoScroll {
 		t.Fatalf("expected logAutoScroll=true by default")
+	}
+}
+
+// ── Toast system tests ──────────────────────────────────────────────────────
+
+func TestToastDuration_LevelMapping(t *testing.T) {
+	if d := toastDuration(ToastSuccess); d != 3*time.Second {
+		t.Fatalf("expected 3s for success, got %v", d)
+	}
+	if d := toastDuration(ToastInfo); d != 3*time.Second {
+		t.Fatalf("expected 3s for info, got %v", d)
+	}
+	if d := toastDuration(ToastWarning); d != 4*time.Second {
+		t.Fatalf("expected 4s for warning, got %v", d)
+	}
+	if d := toastDuration(ToastError); d != 5*time.Second {
+		t.Fatalf("expected 5s for error, got %v", d)
+	}
+}
+
+func TestShowToast_SetsToastAndReturnsCmd(t *testing.T) {
+	m := NewModel()
+	cmd := showToast(&m, ToastSuccess, "hello")
+	if m.toast == nil {
+		t.Fatalf("expected toast to be set")
+	}
+	if m.toast.Message != "hello" {
+		t.Fatalf("expected message 'hello', got %q", m.toast.Message)
+	}
+	if m.toast.Level != ToastSuccess {
+		t.Fatalf("expected ToastSuccess level")
+	}
+	if m.toast.ShownAt.IsZero() {
+		t.Fatalf("expected non-zero ShownAt")
+	}
+	if cmd == nil {
+		t.Fatalf("expected non-nil dismiss cmd")
+	}
+}
+
+func TestToastDismissMsg_ClearsMatchingToast(t *testing.T) {
+	m := NewModel()
+	showToast(&m, ToastInfo, "test")
+	shownAt := m.toast.ShownAt
+
+	updated, _ := m.Update(toastDismissMsg{shownAt: shownAt})
+	m = updated.(Model)
+	if m.toast != nil {
+		t.Fatalf("expected toast cleared by matching dismiss, got %+v", m.toast)
+	}
+}
+
+func TestToastDismissMsg_IgnoresStaleToast(t *testing.T) {
+	m := NewModel()
+	showToast(&m, ToastInfo, "new toast")
+
+	// Send a dismiss with a different shownAt (stale)
+	staleTime := time.Now().Add(-10 * time.Second)
+	updated, _ := m.Update(toastDismissMsg{shownAt: staleTime})
+	m = updated.(Model)
+	if m.toast == nil || m.toast.Message != "new toast" {
+		t.Fatalf("expected stale dismiss to be ignored, toast: %+v", m.toast)
+	}
+}
+
+func TestToastDismissedOnKeyPress(t *testing.T) {
+	m := NewModel()
+	showToast(&m, ToastSuccess, "will be dismissed")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	m = updated.(Model)
+	// Toast should be cleared by key press
+	if m.toast != nil {
+		t.Fatalf("expected toast cleared on key press, got %+v", m.toast)
+	}
+	// But the key should still be processed (help toggled)
+	if !m.ShowHelp {
+		t.Fatalf("expected help toggled despite toast dismissal")
+	}
+}
+
+func TestRenderToast_Nil_ReturnsEmpty(t *testing.T) {
+	m := NewModel()
+	m.toast = nil
+	th := newTheme()
+	result := m.renderToast(th, 80)
+	if result != "" {
+		t.Fatalf("expected empty string for nil toast, got %q", result)
+	}
+}
+
+func TestRenderToast_LevelColors(t *testing.T) {
+	th := newTheme()
+	levels := []struct {
+		level ToastLevel
+		icon  string
+	}{
+		{ToastSuccess, "✔"},
+		{ToastError, "✖"},
+		{ToastWarning, "⚠"},
+		{ToastInfo, "ℹ"},
+	}
+	for _, tc := range levels {
+		m := NewModel()
+		m.Width = 80
+		showToast(&m, tc.level, "test message")
+		result := m.renderToast(th, 80)
+		if result == "" {
+			t.Fatalf("expected non-empty toast for level %d", tc.level)
+		}
+		if !contains(result, tc.icon) {
+			t.Fatalf("expected icon %q in toast for level %d, got %q", tc.icon, tc.level, result)
+		}
+		if !contains(result, "test message") {
+			t.Fatalf("expected 'test message' in toast output for level %d", tc.level)
+		}
 	}
 }

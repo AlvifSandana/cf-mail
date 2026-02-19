@@ -34,15 +34,25 @@ const (
 	panelCount
 )
 
+// ToastLevel represents the severity of a toast notification.
+type ToastLevel int
+
+const (
+	ToastSuccess ToastLevel = iota
+	ToastError
+	ToastWarning
+	ToastInfo
+)
+
 type Model struct {
 	ActivePanel Panel
 	ShowHelp    bool
 	Width       int
 	Height      int
 
-	LastAction string
-	ErrorMsg   string
-	health     HealthStatus
+	// Toast notification (nil = no toast visible)
+	toast  *Toast
+	health HealthStatus
 
 	otpManager   otpManager
 	rulesManager rulesManager
@@ -95,6 +105,40 @@ type logBufferReader interface {
 	Seq() uint64
 }
 
+// Toast represents a transient notification message.
+type Toast struct {
+	Message string
+	Level   ToastLevel
+	ShownAt time.Time
+}
+
+// toastDuration returns the auto-dismiss duration for a toast level.
+func toastDuration(level ToastLevel) time.Duration {
+	switch level {
+	case ToastError:
+		return 5 * time.Second
+	case ToastWarning:
+		return 4 * time.Second
+	default: // ToastSuccess, ToastInfo
+		return 3 * time.Second
+	}
+}
+
+// showToast sets a toast on the model and returns the auto-dismiss command.
+func showToast(m *Model, level ToastLevel, message string) tea.Cmd {
+	now := time.Now().UTC()
+	m.toast = &Toast{
+		Message: message,
+		Level:   level,
+		ShownAt: now,
+	}
+	shownAt := now
+	dur := toastDuration(level)
+	return tea.Tick(dur, func(_ time.Time) tea.Msg {
+		return toastDismissMsg{shownAt: shownAt}
+	})
+}
+
 type ModelConfig struct {
 	OTPManager   otpManager
 	RulesManager rulesManager
@@ -128,7 +172,6 @@ func NewModelWithConfig(cfg ModelConfig) Model {
 	return Model{
 		ActivePanel:   PanelStatus,
 		ShowHelp:      false,
-		LastAction:    "ready",
 		health:        normalizeHealthStatus(cfg.Health),
 		otpManager:    cfg.OTPManager,
 		rulesManager:  cfg.RulesManager,
@@ -165,18 +208,23 @@ func (m Model) Init() tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case toastDismissMsg:
+		// Only dismiss if this msg matches the current toast (stale guard)
+		if m.toast != nil && m.toast.ShownAt.Equal(msg.shownAt) {
+			m.toast = nil
+		}
+		return m, nil
+
 	case otpHistoryLoadedMsg:
 		if !m.otpLastReqAt.IsZero() && msg.reqAt.Before(m.otpLastReqAt) {
 			return m, nil
 		}
 
 		if msg.err != nil {
-			m.ErrorMsg = userSafeError("refresh otp history", msg.err)
-			m.LastAction = "otp refresh failed"
-			return m, nil
+			toastCmd := showToast(&m, ToastError, userSafeError("refresh otp history", msg.err))
+			return m, toastCmd
 		}
 
-		m.ErrorMsg = ""
 		m.otpEvents = msg.events
 		if len(m.otpEvents) == 0 {
 			m.otpSelected = 0
@@ -184,73 +232,63 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.otpSelected = len(m.otpEvents) - 1
 		}
 		m.otpSearchQuery = msg.query
-		m.LastAction = fmt.Sprintf("otp refreshed (%d)", len(m.otpEvents))
-		return m, nil
+		toastCmd := showToast(&m, ToastInfo, fmt.Sprintf("otp refreshed (%d)", len(m.otpEvents)))
+		return m, toastCmd
 
 	case otpCopiedMsg:
 		if msg.err != nil {
-			m.ErrorMsg = userSafeError("copy otp", msg.err)
-			m.LastAction = "copy otp failed"
-			return m, nil
+			toastCmd := showToast(&m, ToastError, userSafeError("copy otp", msg.err))
+			return m, toastCmd
 		}
-		m.ErrorMsg = ""
-		m.LastAction = "otp copied"
-		return m, nil
+		toastCmd := showToast(&m, ToastSuccess, "otp copied")
+		return m, toastCmd
 
 	case cfRulesLoadedMsg:
 		if msg.err != nil {
-			m.ErrorMsg = userSafeError("refresh mail accounts", msg.err)
-			m.LastAction = "mail accounts refresh failed"
-			return m, nil
+			toastCmd := showToast(&m, ToastError, userSafeError("refresh mail accounts", msg.err))
+			return m, toastCmd
 		}
-		m.ErrorMsg = ""
 		m.cfRules = msg.rules
 		if len(m.cfRules) == 0 {
 			m.cfSelected = 0
 		} else if m.cfSelected >= len(m.cfRules) {
 			m.cfSelected = len(m.cfRules) - 1
 		}
-		m.LastAction = fmt.Sprintf("mail accounts refreshed (%d)", len(m.cfRules))
-		return m, nil
+		toastCmd := showToast(&m, ToastInfo, fmt.Sprintf("mail accounts refreshed (%d)", len(m.cfRules)))
+		return m, toastCmd
 
 	case cfRuleCreatedMsg:
 		if msg.err != nil {
-			m.ErrorMsg = userSafeError("create mail account", msg.err)
-			m.LastAction = "create mail account failed"
-			return m, nil
+			toastCmd := showToast(&m, ToastError, userSafeError("create mail account", msg.err))
+			return m, toastCmd
 		}
 
 		m.creating = false
 		m.createAliasEmail = ""
-		m.ErrorMsg = ""
-		m.LastAction = "mail account created"
-		return m, m.refreshCFRulesCmd()
+		toastCmd := showToast(&m, ToastSuccess, "mail account created")
+		return m, tea.Batch(toastCmd, m.refreshCFRulesCmd())
 
 	case cfRuleUpdatedMsg:
 		if msg.err != nil {
-			m.ErrorMsg = userSafeError("toggle mail account", msg.err)
-			m.LastAction = "toggle mail account failed"
-			return m, nil
+			toastCmd := showToast(&m, ToastError, userSafeError("toggle mail account", msg.err))
+			return m, toastCmd
 		}
-		m.ErrorMsg = ""
 		status := "disabled"
 		if msg.rule.Enabled {
 			status = "enabled"
 		}
-		m.LastAction = fmt.Sprintf("mail account %s", status)
-		return m, m.refreshCFRulesCmd()
+		toastCmd := showToast(&m, ToastSuccess, fmt.Sprintf("mail account %s", status))
+		return m, tea.Batch(toastCmd, m.refreshCFRulesCmd())
 
 	case cfRuleDeletedMsg:
 		if msg.err != nil {
 			m.cfDeleteConfirm = false
-			m.ErrorMsg = userSafeError("delete mail account", msg.err)
-			m.LastAction = "delete mail account failed"
-			return m, nil
+			toastCmd := showToast(&m, ToastError, userSafeError("delete mail account", msg.err))
+			return m, toastCmd
 		}
 		m.cfDeleteConfirm = false
-		m.ErrorMsg = ""
-		m.LastAction = "mail account deleted"
-		return m, m.refreshCFRulesCmd()
+		toastCmd := showToast(&m, ToastSuccess, "mail account deleted")
+		return m, tea.Batch(toastCmd, m.refreshCFRulesCmd())
 
 	case app.RuntimeEvent:
 		switch msg.Type {
@@ -260,15 +298,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				mode = "watching(" + sanitizeMailboxMode(msg.Watch.Mode) + ")"
 			}
 			m.health.Mailbox = mode
-			m.LastAction = "mailbox runtime update"
+			// No toast — high-frequency background event
 			return m, nil
 		case app.RuntimeEventRuntimeError:
 			m.health.Mailbox = "error"
+			errMsg := "mailbox runtime error"
 			if strings.TrimSpace(msg.Err) != "" {
-				m.ErrorMsg = userSafeError("mailbox runtime", errors.New(msg.Err))
+				errMsg = userSafeError("mailbox runtime", errors.New(msg.Err))
 			}
-			m.LastAction = "mailbox runtime error"
-			return m, nil
+			toastCmd := showToast(&m, ToastError, errMsg)
+			return m, toastCmd
 		}
 
 	case logTickMsg:
@@ -291,6 +330,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// Dismiss toast on any key press (but don't consume the key —
+		// let it be processed normally by the panel handlers below).
+		if m.toast != nil {
+			m.toast = nil
+		}
+
 		if m.ActivePanel == PanelLogs {
 			updated, cmd, handled := m.updateLogsPanel(msg)
 			if handled {
@@ -317,18 +362,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ShowHelp = !m.ShowHelp
 			return m, nil
 		case "r":
-			m.LastAction = "refresh requested"
-			return m.nextRefreshAllCmd()
+			toastCmd := showToast(&m, ToastInfo, "refreshing...")
+			updated, refreshCmd := m.nextRefreshAllCmd()
+			return updated, tea.Batch(toastCmd, refreshCmd)
 		case "tab":
 			m.ActivePanel = (m.ActivePanel + 1) % panelCount
 			return m, nil
 		case "o":
 			m.ActivePanel = PanelLatestOTP
-			m.LastAction = "otp panel"
 			return m, nil
 		case "l":
 			m.ActivePanel = PanelLogs
-			m.LastAction = "logs panel"
 			return m, nil
 		}
 	}
@@ -418,8 +462,16 @@ func (m Model) View() string {
 		helpH = lipgloss.Height(helpBlock)
 	}
 
-	// Reserve rows: topBar + footer + help (if open)
-	bodyH := totalH - topBarH - footerH - helpH
+	// Pre-render toast to account for its height in the body budget.
+	var toastBlock string
+	toastH := 0
+	if m.toast != nil {
+		toastBlock = m.renderToast(th, totalW)
+		toastH = lipgloss.Height(toastBlock)
+	}
+
+	// Reserve rows: topBar + footer + help (if open) + toast (if visible)
+	bodyH := totalH - topBarH - footerH - helpH - toastH
 	if bodyH < 4 {
 		bodyH = 4
 	}
@@ -451,6 +503,9 @@ func (m Model) View() string {
 	parts := []string{topBar, body}
 	if m.ShowHelp {
 		parts = append(parts, helpBlock)
+	}
+	if toastH > 0 {
+		parts = append(parts, toastBlock)
 	}
 	parts = append(parts, footer)
 
@@ -606,9 +661,6 @@ func (m Model) renderHealthCard(th theme, w int) string {
 		rows = append(rows, nameStr+dot+" "+label)
 	}
 
-	// Feedback / last-action line
-	feedback := " " + m.feedbackBanner(th)
-
 	cardSt := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("238")).
@@ -618,7 +670,7 @@ func (m Model) renderHealthCard(th theme, w int) string {
 		cardSt = cardSt.BorderForeground(th.accent)
 	}
 
-	inner := strings.Join(append([]string{title, ""}, append(rows, "", feedback)...), "\n")
+	inner := strings.Join(append([]string{title, ""}, rows...), "\n")
 	return cardSt.Render(inner)
 }
 
@@ -833,6 +885,51 @@ func (m Model) renderFooter(th theme, totalW int) string {
 		Render(inner)
 }
 
+// renderToast renders the toast notification bar.
+func (m Model) renderToast(th theme, totalW int) string {
+	if m.toast == nil {
+		return ""
+	}
+
+	var icon string
+	var style lipgloss.Style
+
+	switch m.toast.Level {
+	case ToastSuccess:
+		icon = "✔"
+		style = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(th.success).
+			Background(lipgloss.Color("22")) // dark green bg
+	case ToastError:
+		icon = "✖"
+		style = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(th.danger).
+			Background(lipgloss.Color("52")) // dark red bg
+	case ToastWarning:
+		icon = "⚠"
+		style = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(th.warning).
+			Background(lipgloss.Color("58")) // dark yellow bg
+	case ToastInfo:
+		icon = "ℹ"
+		style = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(th.accent).
+			Background(lipgloss.Color("17")) // dark blue bg
+	}
+
+	msg := truncate(m.toast.Message, totalW-10)
+	content := fmt.Sprintf(" %s  %s", icon, msg)
+
+	return style.
+		Width(totalW).
+		Padding(0, 0).
+		Render(content)
+}
+
 // ── Help overlay ──────────────────────────────────────────────────────────────
 
 func (m Model) renderHelp(th theme) string {
@@ -994,32 +1091,6 @@ func (m Model) otpDetailView() string {
 	return strings.Join(rows, "\n")
 }
 
-// feedbackBanner renders the last-action / error feedback row.
-func (m Model) feedbackBanner(th theme) string {
-	if strings.TrimSpace(m.ErrorMsg) != "" {
-		return th.errStyle.
-			Copy().
-			Background(lipgloss.Color("52")).
-			Padding(0, 1).
-			Render("✖  " + m.ErrorMsg)
-	}
-	action := strings.TrimSpace(m.LastAction)
-	if action == "" {
-		action = "ready"
-	}
-	if strings.Contains(strings.ToLower(action), "refresh") || strings.Contains(strings.ToLower(action), "loading") {
-		return th.warnStyle.Render("↻  " + action)
-	}
-	if strings.Contains(strings.ToLower(action), "copied") {
-		return th.successStyle.
-			Copy().
-			Background(lipgloss.Color("22")).
-			Padding(0, 1).
-			Render("✔  " + action)
-	}
-	return th.successStyle.Render("✔  " + action)
-}
-
 func panelLabel(p Panel) string {
 	switch p {
 	case PanelStatus:
@@ -1066,6 +1137,10 @@ type cfRuleDeletedMsg struct {
 }
 
 type logTickMsg struct{}
+
+type toastDismissMsg struct {
+	shownAt time.Time // identifies which toast to dismiss (stale guard)
+}
 
 func (m Model) logTickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(_ time.Time) tea.Msg {
@@ -1223,17 +1298,16 @@ func (m Model) updateMailAccountPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		case "y", "enter":
 			if len(m.cfRules) == 0 || m.cfSelected < 0 || m.cfSelected >= len(m.cfRules) {
 				m.cfDeleteConfirm = false
-				m.ErrorMsg = "invalid mail account selection"
-				m.LastAction = "delete mail account failed"
-				return m, nil, true
+				toastCmd := showToast(&m, ToastError, "invalid mail account selection")
+				return m, toastCmd, true
 			}
 			rule := m.cfRules[m.cfSelected]
-			m.LastAction = "deleting mail account..."
-			return m, m.deleteCFRuleCmd(rule.ID), true
+			toastCmd := showToast(&m, ToastInfo, "deleting mail account...")
+			return m, tea.Batch(toastCmd, m.deleteCFRuleCmd(rule.ID)), true
 		case "n", "esc":
 			m.cfDeleteConfirm = false
-			m.LastAction = "delete mail account cancelled"
-			return m, nil, true
+			toastCmd := showToast(&m, ToastInfo, "delete cancelled")
+			return m, toastCmd, true
 		default:
 			return m, nil, true
 		}
@@ -1244,16 +1318,15 @@ func (m Model) updateMailAccountPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		case "esc":
 			m.creating = false
 			m.createAliasEmail = ""
-			m.LastAction = "create mail account cancelled"
-			return m, nil, true
+			toastCmd := showToast(&m, ToastInfo, "create cancelled")
+			return m, toastCmd, true
 		case "enter":
 			if strings.TrimSpace(m.createAliasEmail) == "" {
-				m.ErrorMsg = "email is required"
-				return m, nil, true
+				toastCmd := showToast(&m, ToastError, "email is required")
+				return m, toastCmd, true
 			}
-			m.LastAction = "creating mail account..."
-			m.ErrorMsg = ""
-			return m, m.createCFRuleCmd(m.createAliasEmail), true
+			toastCmd := showToast(&m, ToastInfo, "creating mail account...")
+			return m, tea.Batch(toastCmd, m.createCFRuleCmd(m.createAliasEmail)), true
 		case "backspace":
 			m.createAliasEmail = trimLastRune(m.createAliasEmail)
 			return m, nil, true
@@ -1273,22 +1346,21 @@ func (m Model) updateMailAccountPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	switch key {
 	case "n":
 		if m.rulesManager == nil {
-			m.ErrorMsg = "rules manager unavailable"
-			return m, nil, true
+			toastCmd := showToast(&m, ToastError, "rules manager unavailable")
+			return m, toastCmd, true
 		}
 		m.creating = true
 		m.createAliasEmail = ""
-		m.ErrorMsg = ""
-		m.LastAction = "create mail account form"
+		// No toast — create form is visually obvious
 		return m, nil, true
 	case "e":
 		if len(m.cfRules) == 0 {
-			m.LastAction = "no mail account to toggle"
-			return m, nil, true
+			toastCmd := showToast(&m, ToastWarning, "no mail account to toggle")
+			return m, toastCmd, true
 		}
 		if m.rulesManager == nil {
-			m.ErrorMsg = "rules manager unavailable"
-			return m, nil, true
+			toastCmd := showToast(&m, ToastError, "rules manager unavailable")
+			return m, toastCmd, true
 		}
 		idx := m.cfSelected
 		if idx < 0 || idx >= len(m.cfRules) {
@@ -1299,23 +1371,23 @@ func (m Model) updateMailAccountPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		if !rule.Enabled {
 			status = "enabling"
 		}
-		m.LastAction = fmt.Sprintf("%s mail account...", status)
-		return m, m.toggleCFRuleCmd(rule), true
+		toastCmd := showToast(&m, ToastInfo, fmt.Sprintf("%s mail account...", status))
+		return m, tea.Batch(toastCmd, m.toggleCFRuleCmd(rule)), true
 	case "d":
 		if len(m.cfRules) == 0 {
-			m.LastAction = "no mail account to delete"
-			return m, nil, true
+			toastCmd := showToast(&m, ToastWarning, "no mail account to delete")
+			return m, toastCmd, true
 		}
 		if m.rulesManager == nil {
-			m.ErrorMsg = "rules manager unavailable"
-			return m, nil, true
+			toastCmd := showToast(&m, ToastError, "rules manager unavailable")
+			return m, toastCmd, true
 		}
 		m.cfDeleteConfirm = true
-		m.LastAction = "confirm delete mail account"
+		// No toast — delete confirm dialog is visually obvious
 		return m, nil, true
 	case "r":
-		m.LastAction = "refreshing mail accounts..."
-		return m, m.refreshCFRulesCmd(), true
+		toastCmd := showToast(&m, ToastInfo, "refreshing mail accounts...")
+		return m, tea.Batch(toastCmd, m.refreshCFRulesCmd()), true
 	case "up", "k":
 		if len(m.cfRules) > 0 && m.cfSelected > 0 {
 			m.cfSelected--
@@ -1431,13 +1503,12 @@ func (m Model) updateOTPPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		case "esc":
 			m.otpSearchMode = false
 			m.otpSearchInput = ""
-			m.LastAction = "otp search cancelled"
+			// No toast — search cancel is obvious from the UI
 			return m, nil, true
 		case "enter":
 			m.otpSearchMode = false
 			m.otpSearchQuery = strings.TrimSpace(m.otpSearchInput)
 			m.otpSearchInput = ""
-			m.LastAction = "otp search requested"
 			reqAt := time.Now().UTC()
 			m.otpLastReqAt = reqAt
 			return m, m.refreshOTPHistoryCmdAt(m.otpSearchQuery, reqAt), true
@@ -1458,34 +1529,34 @@ func (m Model) updateOTPPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	switch key {
 	case "c":
 		if len(m.otpEvents) == 0 {
-			m.LastAction = "no otp to copy"
-			return m, nil, true
+			toastCmd := showToast(&m, ToastWarning, "no otp to copy")
+			return m, toastCmd, true
 		}
 		if m.clipboard == nil {
-			m.LastAction = "clipboard unavailable"
-			return m, nil, true
+			toastCmd := showToast(&m, ToastWarning, "clipboard unavailable")
+			return m, toastCmd, true
 		}
 		idx := m.otpSelected
 		if idx < 0 || idx >= len(m.otpEvents) {
 			idx = 0
 		}
 		evt := m.otpEvents[idx]
-		m.LastAction = "copying otp..."
-		return m, m.copyOTPCmd(evt.OTPCode), true
+		toastCmd := showToast(&m, ToastInfo, "copying otp...")
+		return m, tea.Batch(toastCmd, m.copyOTPCmd(evt.OTPCode)), true
 	case "/":
 		m.otpSearchMode = true
 		m.otpSearchInput = m.otpSearchQuery
-		m.LastAction = "otp search mode"
+		// No toast — search mode is obvious from the input cursor
 		return m, nil, true
 	case "esc":
 		if m.otpSearchQuery == "" {
 			return m, nil, true
 		}
 		m.otpSearchQuery = ""
-		m.LastAction = "otp filter cleared"
+		toastCmd := showToast(&m, ToastInfo, "filter cleared")
 		reqAt := time.Now().UTC()
 		m.otpLastReqAt = reqAt
-		return m, m.refreshOTPHistoryCmdAt("", reqAt), true
+		return m, tea.Batch(toastCmd, m.refreshOTPHistoryCmdAt("", reqAt)), true
 	case "up", "k":
 		if len(m.otpEvents) > 0 && m.otpSelected > 0 {
 			m.otpSelected--

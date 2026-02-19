@@ -69,7 +69,7 @@ func TestSmoke_TUIKeyTransitions(t *testing.T) {
 	if cmd == nil {
 		t.Fatalf("expected copy command")
 	}
-	updated, _ = m.Update(cmd())
+	updated, _ = m.Update(runBatchExtract(cmd))
 	m = updated.(Model)
 	if clip.calls != 1 || clip.lastText != "123456" {
 		t.Fatalf("expected otp copied through clipboard, calls=%d text=%q", clip.calls, clip.lastText)
