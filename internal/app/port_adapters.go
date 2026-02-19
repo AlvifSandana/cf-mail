@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"tuiotp/internal/adapters/cloudflare"
-	"tuiotp/internal/adapters/mailbox/imap"
 	"tuiotp/internal/adapters/parser"
 	"tuiotp/internal/domain"
 	"tuiotp/internal/ports"
@@ -179,14 +178,15 @@ func (a otpDuplicateRepositoryAdapter) ExistsDuplicateWithinWindow(ctx context.C
 }
 
 type runtimeWatchRunnerAdapter struct {
-	watcher *imap.Watcher
+	runner ports.RuntimeWatchRunner
 }
 
 func (a runtimeWatchRunnerAdapter) Run(ctx context.Context, onUpdate func(ports.WatchUpdate)) error {
 	if onUpdate == nil {
 		onUpdate = func(ports.WatchUpdate) {}
 	}
-	return a.watcher.Run(ctx, func(update imap.WatchUpdate) {
-		onUpdate(ports.WatchUpdate{Mode: update.Mode, Timestamp: update.Timestamp})
-	})
+	if a.runner == nil {
+		return domain.WrapValidation("runtime watch runner adapter runner is nil", nil)
+	}
+	return a.runner.Run(ctx, onUpdate)
 }

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -128,7 +129,21 @@ func (c *RuntimeCoordinator) Start(ctx context.Context) error {
 
 		err := c.runner.Run(runCtx, func(update ports.WatchUpdate) {
 			u := update
-			c.emit(RuntimeEvent{Type: RuntimeEventWatcherUpdate, RunID: runID, Watch: &u})
+			safe := sanitizeWatchUpdateForEvent(u)
+			c.emit(RuntimeEvent{Type: RuntimeEventWatcherUpdate, RunID: runID, Watch: &safe})
+
+			if isEmptyIncomingEmail(u.IncomingEmail) {
+				return
+			}
+
+			result, routeErr := c.RouteIncomingEmail(runCtx, u.IncomingEmail)
+			if routeErr != nil {
+				c.emitRuntimeError(runID, routeErr)
+				return
+			}
+			if result.Status == "" {
+				return
+			}
 		})
 		if err != nil && !isContextCancellation(err) {
 			c.emitRuntimeError(runID, err)
@@ -316,4 +331,19 @@ func isContextCancellation(err error) bool {
 	}
 
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func isEmptyIncomingEmail(in domain.IncomingEmail) bool {
+	return len(in.To) == 0 &&
+		strings.TrimSpace(in.From) == "" &&
+		strings.TrimSpace(in.Subject) == "" &&
+		strings.TrimSpace(in.MessageID) == "" &&
+		strings.TrimSpace(in.Snippet) == "" &&
+		strings.TrimSpace(in.Body) == "" &&
+		in.ReceivedAt.IsZero()
+}
+
+func sanitizeWatchUpdateForEvent(in ports.WatchUpdate) ports.WatchUpdate {
+	in.IncomingEmail = domain.IncomingEmail{}
+	return in
 }

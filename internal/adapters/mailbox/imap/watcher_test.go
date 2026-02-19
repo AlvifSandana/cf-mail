@@ -3,6 +3,7 @@ package imap
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -217,5 +218,17 @@ func TestWatcher_Run_PollOnly_CancelStopsGracefully(t *testing.T) {
 	}
 	if fc.pollCalls == 0 {
 		t.Fatalf("expected at least one poll call before cancel")
+	}
+}
+
+func TestWatcher_WatchUpdate_ExposesIncomingEmailPayloadContract(t *testing.T) {
+	updateType := reflect.TypeOf(WatchUpdate{})
+	field, ok := updateType.FieldByName("IncomingEmail")
+	if !ok {
+		t.Fatalf("watch update must expose IncomingEmail payload field for runtime ingestion")
+	}
+
+	if field.Type != reflect.TypeOf(IncomingEmail{}) {
+		t.Fatalf("IncomingEmail payload field must be type imap.IncomingEmail, got %v", field.Type)
 	}
 }

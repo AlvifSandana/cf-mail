@@ -3,11 +3,13 @@ package app
 import (
 	"context"
 	"database/sql"
+	"reflect"
 	"testing"
 	"time"
 
 	"tuiotp/internal/adapters/parser"
 	"tuiotp/internal/domain"
+	"tuiotp/internal/ports"
 	"tuiotp/internal/storage/sqlite"
 )
 
@@ -161,5 +163,79 @@ func TestIntegration_RuntimeCoordinator_RouteIncomingEmailEmitsEvent(t *testing.
 	})
 	if evt.OTPStatus != OTPPipelineStatusStored {
 		t.Fatalf("expected otp processed runtime event payload, got %+v", evt)
+	}
+}
+
+type fakeIngestionRunner struct {
+	update ports.WatchUpdate
+}
+
+func (f *fakeIngestionRunner) Run(ctx context.Context, onUpdate func(ports.WatchUpdate)) error {
+	if onUpdate != nil {
+		onUpdate(f.update)
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func watchUpdateWithIncomingEmail(t *testing.T, in domain.IncomingEmail) ports.WatchUpdate {
+	t.Helper()
+
+	update := ports.WatchUpdate{Mode: "idle", Timestamp: time.Date(2026, 2, 18, 13, 0, 0, 0, time.UTC)}
+	v := reflect.ValueOf(&update).Elem()
+	field := v.FieldByName("IncomingEmail")
+	if !field.IsValid() {
+		t.Fatalf("ports.WatchUpdate must expose IncomingEmail for runtime ingestion")
+	}
+	if !field.CanSet() {
+		t.Fatalf("ports.WatchUpdate.IncomingEmail field must be settable")
+	}
+
+	field.Set(reflect.ValueOf(in))
+	return update
+}
+
+func TestIntegration_RuntimeCoordinator_Start_IngestsWatcherIncomingEmailToStore(t *testing.T) {
+	ctx := context.Background()
+	_, repo, svc := newIntegrationOTPService(t, []parser.Rule{{
+		Platform:     "BANK",
+		FromContains: []string{"bank.example.com"},
+		SubjectRegex: `(?i)otp|code`,
+		OTPRegex:     `\b(\d{6})\b`,
+	}}, "{{.Platform}} {{.OTP}}", time.Minute)
+
+	runner := &fakeIngestionRunner{update: watchUpdateWithIncomingEmail(t, domain.IncomingEmail{
+		To:         []string{"alias-runtime@example.com"},
+		From:       "noreply@bank.example.com",
+		Subject:    "OTP CODE",
+		Body:       "Use 654321 to continue",
+		Snippet:    "654321",
+		MessageID:  "msg-runtime-1",
+		ReceivedAt: time.Date(2026, 2, 18, 13, 0, 0, 0, time.UTC),
+	})}
+
+	coordinator, err := NewRuntimeCoordinator(runner, svc, RuntimeCoordinatorConfig{EventBuffer: 8})
+	if err != nil {
+		t.Fatalf("new runtime coordinator: %v", err)
+	}
+
+	if err := coordinator.Start(ctx); err != nil {
+		t.Fatalf("start runtime coordinator: %v", err)
+	}
+	defer coordinator.Stop()
+
+	otpEvt := waitRuntimeEvent(t, coordinator.Events(), func(evt RuntimeEvent) bool {
+		return evt.Type == RuntimeEventOTPProcessed
+	})
+	if otpEvt.OTPStatus != OTPPipelineStatusStored {
+		t.Fatalf("expected runtime ingestion to persist otp, got %+v", otpEvt)
+	}
+
+	rows, err := repo.List(ctx, sqlite.OTPListFilter{AliasEmail: "alias-runtime@example.com", Limit: 10})
+	if err != nil {
+		t.Fatalf("list otp rows: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected one ingested otp row, got %d", len(rows))
 	}
 }

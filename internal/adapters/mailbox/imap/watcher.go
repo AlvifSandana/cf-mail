@@ -15,8 +15,9 @@ type WatcherConfig struct {
 }
 
 type WatchUpdate struct {
-	Mode      string
-	Timestamp time.Time
+	Mode          string
+	Timestamp     time.Time
+	IncomingEmail IncomingEmail
 }
 
 type WatchClient interface {
@@ -71,7 +72,7 @@ func (w *Watcher) Run(ctx context.Context, onUpdate func(WatchUpdate)) error {
 			}
 			return w.runPolling(ctx, onUpdate)
 		}
-		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 			return nil
 		}
 
@@ -93,7 +94,7 @@ func (w *Watcher) runPolling(ctx context.Context, onUpdate func(WatchUpdate)) er
 		}
 
 		if err := w.client.Poll(ctx); err != nil {
-			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 				return nil
 			}
 			return fmt.Errorf("poll mailbox: %w", err)
@@ -102,7 +103,7 @@ func (w *Watcher) runPolling(ctx context.Context, onUpdate func(WatchUpdate)) er
 		onUpdate(WatchUpdate{Mode: "poll", Timestamp: w.nowFn().UTC()})
 
 		if err := w.sleepFn(ctx, w.cfg.PollInterval); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			if errors.Is(err, context.Canceled) {
 				return nil
 			}
 			return fmt.Errorf("poll interval wait: %w", err)

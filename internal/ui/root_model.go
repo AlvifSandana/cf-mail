@@ -213,6 +213,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.LastAction = "otp copied"
 		return m, nil
 
+	case app.RuntimeEvent:
+		switch msg.Type {
+		case app.RuntimeEventWatcherUpdate:
+			mode := "watching"
+			if msg.Watch != nil && strings.TrimSpace(msg.Watch.Mode) != "" {
+				mode = "watching(" + sanitizeMailboxMode(msg.Watch.Mode) + ")"
+			}
+			m.health.Mailbox = mode
+			m.LastAction = "mailbox runtime update"
+			return m, nil
+		case app.RuntimeEventRuntimeError:
+			m.health.Mailbox = "error"
+			if strings.TrimSpace(msg.Err) != "" {
+				m.ErrorMsg = userSafeError("mailbox runtime", errors.New(msg.Err))
+			}
+			m.LastAction = "mailbox runtime error"
+			return m, nil
+		}
+
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
 		m.Height = msg.Height
@@ -782,6 +801,19 @@ func normalizeHealthValue(v, fallback string) string {
 	}
 
 	return v
+}
+
+func sanitizeMailboxMode(mode string) string {
+	m := strings.ToLower(strings.TrimSpace(mode))
+	if m == "" {
+		return "unknown"
+	}
+	switch m {
+	case "idle", "poll", "reconnect", "reconnecting", "connected", "watching":
+		return m
+	default:
+		return "unknown"
+	}
 }
 
 func (m Model) healthLine() string {

@@ -50,6 +50,8 @@ type Connector struct {
 	closeErr  error
 }
 
+const defaultPollTimeout = 15 * time.Second
+
 func ValidateConfig(cfg Config) error {
 	if strings.TrimSpace(cfg.Host) == "" {
 		return fmt.Errorf("imap.host is required")
@@ -139,6 +141,33 @@ func (c *Connector) Mailbox() MailboxStatus {
 		return MailboxStatus{}
 	}
 	return c.mailbox
+}
+
+// Poll checks mailbox session health by issuing a lightweight select
+// against the currently selected mailbox.
+func (c *Connector) Poll(ctx context.Context) error {
+	if c == nil {
+		return fmt.Errorf("imap connector is nil")
+	}
+	if c.client == nil {
+		return fmt.Errorf("imap connector client is nil")
+	}
+	if strings.TrimSpace(c.mailbox.Name) == "" {
+		return fmt.Errorf("imap connector mailbox is empty")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	pollCtx, cancel := context.WithTimeout(ctx, defaultPollTimeout)
+	defer cancel()
+
+	return callWithContext(pollCtx, func() error {
+		_, err := c.client.Select(c.mailbox.Name, false)
+		return err
+	}, func() {
+		_ = c.client.Close()
+	})
 }
 
 func (c *Connector) Close() error {

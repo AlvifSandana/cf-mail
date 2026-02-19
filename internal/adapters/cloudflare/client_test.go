@@ -195,7 +195,48 @@ func TestNewClient_RejectsInsecureBaseURLByDefault(t *testing.T) {
 	}
 }
 
-func TestClient_DoJSON_NoRetryForPost(t *testing.T) {
+func TestClient_DoJSON_NoRetryOn429ForPostEvenWhenRetryAfterPresent(t *testing.T) {
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"ok":false}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, 1)
+
+	err := c.DoJSON(context.Background(), http.MethodPost, "/post-retry", nil, map[string]any{"name": "x"}, nil)
+	if err == nil {
+		t.Fatalf("expected error for 429 response")
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Fatalf("expected exactly 1 attempt for POST on 429, got %d", got)
+	}
+}
+
+func TestClient_DoJSON_NoRetryOn429ForPostWithoutRetryAfter(t *testing.T) {
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"ok":false}`))
+	}))
+	defer server.Close()
+
+	c := newTestClient(t, server.URL, 2)
+
+	err := c.DoJSON(context.Background(), http.MethodPost, "/post-no-retry", nil, map[string]any{"name": "x"}, nil)
+	if err == nil {
+		t.Fatalf("expected error for 429 response")
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Fatalf("expected exactly 1 attempt for POST without Retry-After, got %d", got)
+	}
+}
+
+func TestClient_DoJSON_NoRetryOn5xxForPost(t *testing.T) {
 	var attempts int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&attempts, 1)
@@ -204,14 +245,14 @@ func TestClient_DoJSON_NoRetryForPost(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newTestClient(t, server.URL, 3)
+	c := newTestClient(t, server.URL, 2)
 
-	err := c.DoJSON(context.Background(), http.MethodPost, "/post-no-retry", nil, map[string]any{"name": "x"}, nil)
+	err := c.DoJSON(context.Background(), http.MethodPost, "/post-no-retry-5xx", nil, map[string]any{"name": "x"}, nil)
 	if err == nil {
 		t.Fatalf("expected error for 502 response")
 	}
 	if got := atomic.LoadInt32(&attempts); got != 1 {
-		t.Fatalf("expected exactly 1 attempt for POST, got %d", got)
+		t.Fatalf("expected exactly 1 attempt for POST on 5xx, got %d", got)
 	}
 }
 

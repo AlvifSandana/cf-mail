@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -87,6 +88,9 @@ func TestRuntimeCoordinator_StartStop_EmitsWatcherAndStoppedEvents(t *testing.T)
 	if watchEvt.Watch == nil || watchEvt.Watch.Mode != "poll" {
 		t.Fatalf("unexpected watch event payload: %+v", watchEvt)
 	}
+	if !isEmptyIncomingEmail(watchEvt.Watch.IncomingEmail) {
+		t.Fatalf("expected watcher event payload to redact incoming email content")
+	}
 
 	c.Stop()
 
@@ -95,6 +99,29 @@ func TestRuntimeCoordinator_StartStop_EmitsWatcherAndStoppedEvents(t *testing.T)
 	})
 	if stoppedEvt.Type != RuntimeEventRuntimeStopped {
 		t.Fatalf("unexpected stopped event: %+v", stoppedEvt)
+	}
+}
+
+func TestSanitizeWatchUpdateForEvent_RedactsIncomingEmail(t *testing.T) {
+	in := ports.WatchUpdate{
+		Mode:      "idle",
+		Timestamp: time.Date(2026, 2, 18, 12, 0, 0, 0, time.UTC),
+		IncomingEmail: domain.IncomingEmail{
+			To:        []string{"alias@example.com"},
+			From:      "sender@example.com",
+			Subject:   "subject",
+			MessageID: "msg-1",
+			Snippet:   "snippet",
+			Body:      "body",
+		},
+	}
+
+	out := sanitizeWatchUpdateForEvent(in)
+	if out.Mode != in.Mode || !out.Timestamp.Equal(in.Timestamp) {
+		t.Fatalf("expected non-sensitive watch update fields to be preserved")
+	}
+	if !isEmptyIncomingEmail(out.IncomingEmail) {
+		t.Fatalf("expected incoming email payload redacted for runtime event")
 	}
 }
 
@@ -318,6 +345,19 @@ func TestRuntimeCoordinator_EmitRuntimeError_AlwaysSanitized(t *testing.T) {
 		return evt.Type == RuntimeEventRuntimeError
 	})
 	assertSanitizedRuntimeErrorEvent(t, errEvt, "raw secret detail")
+}
+
+func TestRuntimeWatchRunnerAdapter_ProductionPathAcceptsGenericRuntimeRunner(t *testing.T) {
+	adapterType := reflect.TypeOf(runtimeWatchRunnerAdapter{})
+	field, ok := adapterType.FieldByName("runner")
+	if !ok {
+		t.Fatalf("runtime watch adapter should depend on generic runtime runner field to support reconnector path")
+	}
+
+	runnerIface := reflect.TypeOf((*ports.RuntimeWatchRunner)(nil)).Elem()
+	if !field.Type.Implements(runnerIface) {
+		t.Fatalf("runtime adapter runner field must implement ports.RuntimeWatchRunner, got %v", field.Type)
+	}
 }
 
 func waitRuntimeEvent(t *testing.T, ch <-chan RuntimeEvent, predicate func(RuntimeEvent) bool) RuntimeEvent {

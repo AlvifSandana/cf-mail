@@ -222,8 +222,11 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			return nil, resp.StatusCode, fmt.Errorf("response body too large")
 		}
 
-		if retryEnabled && attempt < c.maxRetries && shouldRetryStatus(resp.StatusCode) {
-			if err := c.sleepFn(ctx, c.backoffDuration(attempt, resp.Header.Get("Retry-After"))); err != nil {
+		retryAfter := resp.Header.Get("Retry-After")
+		shouldRetry := retryEnabled && shouldRetryStatus(resp.StatusCode)
+
+		if shouldRetry && attempt < c.maxRetries {
+			if err := c.sleepFn(ctx, c.backoffDuration(attempt, retryAfter)); err != nil {
 				return nil, 0, err
 			}
 			continue

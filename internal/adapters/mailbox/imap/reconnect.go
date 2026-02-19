@@ -29,6 +29,7 @@ type Reconnector struct {
 
 	randFloatFn func() float64
 	sleepFn     func(context.Context, time.Duration) error
+	nowFn       func() time.Time
 }
 
 func NewReconnector(factory SessionFactory, cfg ReconnectConfig) (*Reconnector, error) {
@@ -52,6 +53,7 @@ func NewReconnector(factory SessionFactory, cfg ReconnectConfig) (*Reconnector, 
 		maxStep:     maxBackoffStep(cfg.BaseBackoff, cfg.MaxBackoff),
 		randFloatFn: defaultRandFloat,
 		sleepFn:     sleepWithContext,
+		nowFn:       time.Now,
 	}, nil
 }
 
@@ -74,6 +76,7 @@ func (r *Reconnector) Run(ctx context.Context, onUpdate func(WatchUpdate)) error
 
 		session, err := r.factory(ctx)
 		if err != nil {
+			onUpdate(WatchUpdate{Mode: "reconnecting", Timestamp: r.nowFn().UTC()})
 			if err := r.waitBackoff(ctx, attempt); err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return nil
@@ -83,6 +86,8 @@ func (r *Reconnector) Run(ctx context.Context, onUpdate func(WatchUpdate)) error
 			attempt = r.nextStep(attempt)
 			continue
 		}
+
+		onUpdate(WatchUpdate{Mode: "connected", Timestamp: r.nowFn().UTC()})
 
 		runErr := session.Run(ctx, onUpdate)
 		closeErr := session.Close()
@@ -101,6 +106,7 @@ func (r *Reconnector) Run(ctx context.Context, onUpdate func(WatchUpdate)) error
 		if runErr == nil {
 			attempt = 0
 		} else {
+			onUpdate(WatchUpdate{Mode: "reconnecting", Timestamp: r.nowFn().UTC()})
 			if err := r.waitBackoff(ctx, attempt); err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return nil

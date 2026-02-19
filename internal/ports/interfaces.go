@@ -77,8 +77,9 @@ type RuntimeWatchRunner interface {
 }
 
 type WatchUpdate struct {
-	Mode      string
-	Timestamp time.Time
+	Mode          string
+	Timestamp     time.Time
+	IncomingEmail domain.IncomingEmail
 }
 
 // Clipboard defines clipboard adapter contract.

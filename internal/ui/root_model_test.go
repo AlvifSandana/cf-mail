@@ -11,6 +11,7 @@ import (
 
 	"tuiotp/internal/app"
 	"tuiotp/internal/domain"
+	"tuiotp/internal/ports"
 )
 
 type fakeAliasManager struct {
@@ -584,6 +585,37 @@ func TestModel_OTPPanel_CopyHotkeyNilContextSafe(t *testing.T) {
 	m = updated.(Model)
 	if clip.calls != 1 || clip.lastText != "555555" {
 		t.Fatalf("expected copy called with otp text, calls=%d text=%q", clip.calls, clip.lastText)
+	}
+}
+
+func TestModel_Update_RuntimeWatcherEvent_RefreshesLiveMailboxHealth(t *testing.T) {
+	m := NewModelWithConfig(ModelConfig{Health: HealthStatus{Mailbox: "configured"}})
+
+	updated, _ := m.Update(app.RuntimeEvent{
+		Type: app.RuntimeEventWatcherUpdate,
+		Watch: &ports.WatchUpdate{
+			Mode:      "idle",
+			Timestamp: time.Date(2026, 2, 18, 14, 0, 0, 0, time.UTC),
+		},
+	})
+	m = updated.(Model)
+
+	if m.health.Mailbox == "configured" {
+		t.Fatalf("expected mailbox health to update from runtime watcher event")
+	}
+	if !contains(strings.ToLower(m.LastAction), "mailbox") {
+		t.Fatalf("expected last action to mention mailbox runtime update, got %q", m.LastAction)
+	}
+}
+
+func TestModel_Update_RuntimeErrorEvent_ReflectsRuntimeFailureInStatus(t *testing.T) {
+	m := NewModelWithConfig(ModelConfig{Health: HealthStatus{Mailbox: "ready"}})
+
+	updated, _ := m.Update(app.RuntimeEvent{Type: app.RuntimeEventRuntimeError, Err: "runtime watch failed"})
+	m = updated.(Model)
+
+	if m.health.Mailbox == "ready" {
+		t.Fatalf("expected mailbox health to transition on runtime error event")
 	}
 }
 
