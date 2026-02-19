@@ -124,7 +124,8 @@ func toastDuration(level ToastLevel) time.Duration {
 	}
 }
 
-// showToast sets a toast on the model and returns the auto-dismiss command.
+// showToast sets a toast on the model and returns the auto-dismiss command
+// along with a 1-second tick for the live countdown display.
 func showToast(m *Model, level ToastLevel, message string) tea.Cmd {
 	now := time.Now().UTC()
 	m.toast = &Toast{
@@ -134,9 +135,13 @@ func showToast(m *Model, level ToastLevel, message string) tea.Cmd {
 	}
 	shownAt := now
 	dur := toastDuration(level)
-	return tea.Tick(dur, func(_ time.Time) tea.Msg {
+	dismissCmd := tea.Tick(dur, func(_ time.Time) tea.Msg {
 		return toastDismissMsg{shownAt: shownAt}
 	})
+	tickCmd := tea.Tick(time.Second, func(_ time.Time) tea.Msg {
+		return toastTickMsg{}
+	})
+	return tea.Batch(dismissCmd, tickCmd)
 }
 
 type ModelConfig struct {
@@ -208,6 +213,18 @@ func (m Model) Init() tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case toastTickMsg:
+		if m.toast == nil {
+			return m, nil
+		}
+		remaining := toastDuration(m.toast.Level) - time.Since(m.toast.ShownAt)
+		if remaining <= 0 {
+			return m, nil
+		}
+		return m, tea.Tick(time.Second, func(_ time.Time) tea.Msg {
+			return toastTickMsg{}
+		})
+
 	case toastDismissMsg:
 		// Only dismiss if this msg matches the current toast (stale guard)
 		if m.toast != nil && m.toast.ShownAt.Equal(msg.shownAt) {
@@ -922,7 +939,20 @@ func (m Model) renderToast(th theme, totalW int) string {
 	}
 
 	msg := truncate(m.toast.Message, totalW-10)
-	content := fmt.Sprintf(" %s  %s", icon, msg)
+	left := fmt.Sprintf(" %s  %s", icon, msg)
+
+	remaining := toastDuration(m.toast.Level) - time.Since(m.toast.ShownAt)
+	secs := int(remaining.Seconds())
+	if secs < 0 {
+		secs = 0
+	}
+	countdown := fmt.Sprintf("(%ds)", secs)
+
+	gap := totalW - lipgloss.Width(left) - lipgloss.Width(countdown) - 1
+	if gap < 1 {
+		gap = 1
+	}
+	content := left + strings.Repeat(" ", gap) + countdown
 
 	return style.
 		Width(totalW).
@@ -1137,6 +1167,8 @@ type cfRuleDeletedMsg struct {
 }
 
 type logTickMsg struct{}
+
+type toastTickMsg struct{}
 
 type toastDismissMsg struct {
 	shownAt time.Time // identifies which toast to dismiss (stale guard)

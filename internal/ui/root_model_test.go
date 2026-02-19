@@ -530,23 +530,48 @@ func contains(s, sub string) bool {
 }
 
 // runBatchExtract executes a cmd; if it returns a tea.BatchMsg, it finds
-// and executes the first non-toast-dismiss sub-command, returning its message.
+// and returns the first non-toast async message. Toast timer commands
+// (tea.Tick for dismiss/countdown) are identified by their batch shape
+// and skipped to avoid blocking tests.
 func runBatchExtract(cmd tea.Cmd) tea.Msg {
 	if cmd == nil {
 		return nil
 	}
 	msg := cmd()
+	return extractNonToastMsg(msg)
+}
+
+func extractNonToastMsg(msg tea.Msg) tea.Msg {
+	if msg == nil {
+		return nil
+	}
+	if _, ok := msg.(toastDismissMsg); ok {
+		return nil
+	}
+	if _, ok := msg.(toastTickMsg); ok {
+		return nil
+	}
 	batch, ok := msg.(tea.BatchMsg)
 	if !ok {
 		return msg
 	}
+	// Try each sub-command with a per-cmd timeout.
+	// Toast timer cmds (tea.Tick) block for 1-5s; real async cmds return immediately.
 	for _, sub := range batch {
 		if sub == nil {
 			continue
 		}
-		result := sub()
-		if _, isToast := result.(toastDismissMsg); !isToast {
-			return result
+		ch := make(chan tea.Msg, 1)
+		go func() { ch <- sub() }()
+		select {
+		case result := <-ch:
+			found := extractNonToastMsg(result)
+			if found != nil {
+				return found
+			}
+		case <-time.After(50 * time.Millisecond):
+			// This sub-cmd is a blocking tea.Tick — skip it.
+			continue
 		}
 	}
 	return nil
@@ -1698,5 +1723,57 @@ func TestRenderToast_LevelColors(t *testing.T) {
 		if !contains(result, "test message") {
 			t.Fatalf("expected 'test message' in toast output for level %d", tc.level)
 		}
+	}
+}
+
+func TestToastTickMsg_ReschedulesWhenToastActive(t *testing.T) {
+	m := NewModel()
+	showToast(&m, ToastInfo, "test")
+
+	updated, cmd := m.Update(toastTickMsg{})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected tick to be rescheduled while toast is active")
+	}
+	if m.toast == nil || m.toast.Message != "test" {
+		t.Fatalf("expected toast unchanged after tick")
+	}
+}
+
+func TestToastTickMsg_StopsWhenNoToast(t *testing.T) {
+	m := NewModel()
+	// No toast set
+
+	updated, cmd := m.Update(toastTickMsg{})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("expected nil cmd when no toast active")
+	}
+}
+
+func TestToastTickMsg_StopsWhenExpired(t *testing.T) {
+	m := NewModel()
+	showToast(&m, ToastInfo, "expired")
+	// Backdate ShownAt so toast is already expired
+	m.toast.ShownAt = time.Now().Add(-10 * time.Second)
+
+	updated, cmd := m.Update(toastTickMsg{})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("expected nil cmd when toast is expired")
+	}
+}
+
+func TestRenderToast_ShowsCountdown(t *testing.T) {
+	m := NewModel()
+	m.Width = 80
+	showToast(&m, ToastInfo, "hello")
+	// ShownAt is ~now, so remaining should be ~3s
+
+	th := newTheme()
+	result := m.renderToast(th, 80)
+	// Should contain countdown like "(3s)" or "(2s)"
+	if !contains(result, "s)") {
+		t.Fatalf("expected countdown in toast, got %q", result)
 	}
 }
