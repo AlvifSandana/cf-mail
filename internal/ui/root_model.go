@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -397,6 +398,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.settingsLogPathInput = m.settingsForm.LogPath
 		m.settingsPollInput = m.settingsForm.IMAPPollInterval
 		m.settingsEditing = false
+		if m.rulesManager != nil {
+			if active := strings.TrimSpace(m.settingsForm.ActiveDomain); active != "" {
+				if err := m.rulesManager.SetActiveDomain(active); err != nil {
+					toastCmd := showToast(&m, ToastWarning, "settings loaded; active domain apply requires refresh/restart")
+					return m, toastCmd
+				}
+				return m, m.refreshCFRulesCmd()
+			}
+		}
 		return m, nil
 
 	case settingsSavedMsg:
@@ -405,6 +415,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			toastCmd := showToast(&m, ToastError, userSafeError("save settings", msg.err))
 			return m, toastCmd
 		}
+		prevDomains := canonicalDomainsText(m.settingsOriginal.DomainsText)
+		nextDomains := canonicalDomainsText(msg.state.DomainsText)
+		domainsChanged := prevDomains != nextDomains
 		m.settingsLoaded = true
 		m.settingsForm = normalizeSettingsState(msg.state)
 		m.settingsOriginal = m.settingsForm
@@ -416,7 +429,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.settingsPollInput = m.settingsForm.IMAPPollInterval
 		m.settingsEditing = false
 		m.clipboard = msg.clipboard
+		if domainsChanged {
+			toastCmd := showToast(&m, ToastWarning, "settings saved; domain list changed, restart app to apply new domains")
+			if m.rulesManager != nil {
+				return m, tea.Batch(toastCmd, m.refreshCFRulesCmd())
+			}
+			return m, toastCmd
+		}
+		if m.rulesManager != nil {
+			if active := strings.TrimSpace(m.settingsForm.ActiveDomain); active != "" {
+				if err := m.rulesManager.SetActiveDomain(active); err != nil {
+					toastCmd := showToast(&m, ToastWarning, "settings saved; active domain apply requires restart")
+					return m, toastCmd
+				}
+			}
+		}
 		toastCmd := showToast(&m, ToastSuccess, "settings saved and applied")
+		if m.rulesManager != nil {
+			return m, tea.Batch(toastCmd, m.refreshCFRulesCmd())
+		}
 		return m, toastCmd
 
 	case app.RuntimeEvent:
@@ -671,6 +702,7 @@ func (m Model) View() string {
 		sidebar := m.renderSidebar(th, totalW, sidebarH, false)
 		body = lipgloss.JoinVertical(lipgloss.Left, mainContent, sidebar)
 	}
+	body = fitBlock(body, totalW, bodyH, th.bg)
 
 	// ── Assemble final output ────────────────────────────────────────────
 	parts := []string{topBar, body}
@@ -2609,6 +2641,61 @@ func clampLines(s string, maxLines int) string {
 		return s
 	}
 	return strings.Join(lines[:maxLines], "\n")
+}
+
+func canonicalDomainsText(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	parts := strings.FieldsFunc(v, func(r rune) bool {
+		switch r {
+		case '\n', ';', '|':
+			return true
+		default:
+			return false
+		}
+	})
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return strings.Join(out, "|")
+}
+
+// fitBlock ensures a rendered block fits exactly inside width x height.
+func fitBlock(s string, maxW, maxH int, bg lipgloss.Color) string {
+	if maxW <= 0 || maxH <= 0 {
+		return ""
+	}
+
+	lines := strings.Split(s, "\n")
+	if len(lines) > maxH {
+		lines = lines[:maxH]
+	}
+
+	padBg := lipgloss.NewStyle().Background(bg)
+	for i := range lines {
+		if lipgloss.Width(lines[i]) > maxW {
+			lines[i] = xansi.Truncate(lines[i], maxW, "")
+		}
+		w := lipgloss.Width(lines[i])
+		if w < maxW {
+			lines[i] += padBg.Render(strings.Repeat(" ", maxW-w))
+		}
+	}
+
+	blank := lipgloss.NewStyle().Background(bg).Width(maxW).Render("")
+	for len(lines) < maxH {
+		lines = append(lines, blank)
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 func trimLastRune(v string) string {

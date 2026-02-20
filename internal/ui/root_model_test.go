@@ -920,22 +920,25 @@ func extractNonToastMsg(msg tea.Msg) tea.Msg {
 // ── fakeRulesManager ─────────────────────────────────────────────────────────
 
 type fakeRulesManager struct {
-	listResult   []ports.RoutingRule
-	listErr      error
-	listCalls    int
-	domains      []string
-	activeDomain string
-	createResult ports.RoutingRule
-	createErr    error
-	createCalls  int
-	lastCreate   ports.CreateRoutingRuleInput
-	updateResult ports.RoutingRule
-	updateErr    error
-	updateCalls  int
-	lastUpdate   ports.UpdateRoutingRuleInput
-	deleteErr    error
-	deleteCalls  int
-	lastDeleteID string
+	listResult     []ports.RoutingRule
+	listErr        error
+	listCalls      int
+	domains        []string
+	activeDomain   string
+	setActiveErr   error
+	setActiveCalls int
+	lastSetActive  string
+	createResult   ports.RoutingRule
+	createErr      error
+	createCalls    int
+	lastCreate     ports.CreateRoutingRuleInput
+	updateResult   ports.RoutingRule
+	updateErr      error
+	updateCalls    int
+	lastUpdate     ports.UpdateRoutingRuleInput
+	deleteErr      error
+	deleteCalls    int
+	lastDeleteID   string
 }
 
 func (f *fakeRulesManager) ListDomains() []string {
@@ -949,8 +952,13 @@ func (f *fakeRulesManager) ActiveDomain() string {
 }
 
 func (f *fakeRulesManager) SetActiveDomain(domain string) error {
+	f.setActiveCalls++
+	f.lastSetActive = domain
 	if strings.TrimSpace(domain) == "" {
 		return errors.New("active domain is required")
+	}
+	if f.setActiveErr != nil {
+		return f.setActiveErr
 	}
 	f.activeDomain = strings.ToLower(strings.TrimSpace(domain))
 	return nil
@@ -2010,6 +2018,37 @@ func TestModel_View_TinyTerminal_FallsBackMinimalView(t *testing.T) {
 	}
 }
 
+func TestModel_View_FitsWithinTerminalWidthAndHeight(t *testing.T) {
+	sizes := []struct{ w, h int }{
+		{120, 40},
+		{100, 28},
+		{90, 24},
+		{80, 20},
+		{64, 16},
+	}
+
+	for _, sz := range sizes {
+		m := NewModelWithConfig(ModelConfig{})
+		m.Width = sz.w
+		m.Height = sz.h
+		m.ShowHelp = true
+		m.toast = &Toast{Level: ToastInfo, Message: "hello", ShownAt: time.Now().UTC()}
+		m.otpEvents = []domain.OTPEvent{{Platform: "SHOP", OTPCode: "123456", AliasEmail: "a@example.com", ReceivedAt: time.Now().UTC()}}
+		m.cfRules = []ports.RoutingRule{{ID: "r1", AliasEmail: "a@example.com", Enabled: true}}
+
+		output := m.View()
+		lines := strings.Split(output, "\n")
+		if len(lines) != sz.h {
+			t.Fatalf("expected exact %d lines, got %d", sz.h, len(lines))
+		}
+		for i, line := range lines {
+			if w := lipgloss.Width(line); w > sz.w {
+				t.Fatalf("line %d width overflow: got %d > %d", i, w, sz.w)
+			}
+		}
+	}
+}
+
 func TestModel_LogTickMsg_AutoScrollResetsScrollToZero(t *testing.T) {
 	buf := &fakeLogBuffer{
 		lines: []string{"line1", "line2", "line3"},
@@ -2339,6 +2378,139 @@ func TestModel_SettingsPanel_EditLogPathAndPollIntervalThenSave(t *testing.T) {
 	}
 	if fakeSettings.lastSavedState.IMAPPollInterval != "10s" {
 		t.Fatalf("expected saved poll interval 10s, got %q", fakeSettings.lastSavedState.IMAPPollInterval)
+	}
+}
+
+func TestModel_SettingsSaved_AppliesActiveDomainToRulesManager(t *testing.T) {
+	fakeSettings := &fakeSettingsManager{
+		saveState: SettingsState{ClipboardEnabled: true, ClipboardMethod: "auto", ActiveDomain: "example.net"},
+	}
+	fakeRules := &fakeRulesManager{domains: []string{"example.com", "example.net"}, activeDomain: "example.com"}
+	m := NewModelWithConfig(ModelConfig{SettingsMgr: fakeSettings, RulesManager: fakeRules})
+	m.ActivePanel = PanelSettings
+	m.settingsLoaded = true
+	m.settingsForm = SettingsState{ClipboardEnabled: true, ClipboardMethod: "auto", ActiveDomain: "example.net"}
+	m.settingsOriginal = m.settingsForm
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("expected save command")
+	}
+	msg := runBatchExtract(cmd)
+	if _, ok := msg.(settingsSavedMsg); !ok {
+		t.Fatalf("expected settingsSavedMsg, got %T", msg)
+	}
+
+	updated, cmd := m.Update(msg)
+	m = updated.(Model)
+	if fakeRules.activeDomain != "example.net" {
+		t.Fatalf("expected active domain updated to example.net, got %q", fakeRules.activeDomain)
+	}
+	if fakeRules.setActiveCalls == 0 {
+		t.Fatalf("expected SetActiveDomain to be called")
+	}
+	if cmd == nil {
+		t.Fatalf("expected refresh command after settings saved")
+	}
+}
+
+func TestModel_SettingsSaved_ActiveDomainApplyFailureShowsWarning(t *testing.T) {
+	fakeSettings := &fakeSettingsManager{
+		saveState: SettingsState{ClipboardEnabled: true, ClipboardMethod: "auto", ActiveDomain: "example.net"},
+	}
+	fakeRules := &fakeRulesManager{
+		domains:      []string{"example.com", "example.net"},
+		activeDomain: "example.com",
+		setActiveErr: errors.New("switch failed"),
+	}
+	m := NewModelWithConfig(ModelConfig{SettingsMgr: fakeSettings, RulesManager: fakeRules})
+	m.ActivePanel = PanelSettings
+	m.settingsLoaded = true
+	m.settingsForm = SettingsState{ClipboardEnabled: true, ClipboardMethod: "auto", ActiveDomain: "example.net"}
+	m.settingsOriginal = m.settingsForm
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	msg := runBatchExtract(cmd)
+	updated, _ := m.Update(msg)
+	m = updated.(Model)
+
+	if m.toast == nil || m.toast.Level != ToastWarning {
+		t.Fatalf("expected warning toast when active domain apply fails, got %+v", m.toast)
+	}
+	if !contains(m.toast.Message, "active domain apply") {
+		t.Fatalf("expected warning toast message about active domain apply, got %+v", m.toast)
+	}
+}
+
+func TestModel_SettingsSaved_DomainListChanged_ShowsRestartWarning(t *testing.T) {
+	fakeSettings := &fakeSettingsManager{
+		saveState: SettingsState{
+			ClipboardEnabled: true,
+			ClipboardMethod:  "auto",
+			DomainsText:      "example.com,z1\nexample.net,z2",
+			ActiveDomain:     "example.net",
+		},
+	}
+	fakeRules := &fakeRulesManager{domains: []string{"example.com"}, activeDomain: "example.com"}
+	m := NewModelWithConfig(ModelConfig{SettingsMgr: fakeSettings, RulesManager: fakeRules})
+	m.ActivePanel = PanelSettings
+	m.settingsLoaded = true
+	m.settingsForm = SettingsState{
+		ClipboardEnabled: true,
+		ClipboardMethod:  "auto",
+		DomainsText:      "example.com,z1",
+		ActiveDomain:     "example.com",
+	}
+	m.settingsOriginal = m.settingsForm
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	msg := runBatchExtract(cmd)
+	updated, _ := m.Update(msg)
+	m = updated.(Model)
+
+	if m.toast == nil || m.toast.Level != ToastWarning {
+		t.Fatalf("expected warning toast for changed domain list, got %+v", m.toast)
+	}
+	if !contains(m.toast.Message, "restart app") {
+		t.Fatalf("expected restart warning toast, got %+v", m.toast)
+	}
+	if fakeRules.setActiveCalls != 0 {
+		t.Fatalf("expected no SetActiveDomain call when domains changed, got %d", fakeRules.setActiveCalls)
+	}
+}
+
+func TestModel_SettingsLoaded_AppliesActiveDomainAndRefreshesRules(t *testing.T) {
+	fakeRules := &fakeRulesManager{domains: []string{"example.com", "example.net"}, activeDomain: "example.com"}
+	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
+
+	updated, cmd := m.Update(settingsLoadedMsg{state: SettingsState{ClipboardEnabled: true, ClipboardMethod: "auto", ActiveDomain: "example.net"}})
+	m = updated.(Model)
+	if fakeRules.activeDomain != "example.net" {
+		t.Fatalf("expected active domain updated on settings load, got %q", fakeRules.activeDomain)
+	}
+	if fakeRules.setActiveCalls == 0 {
+		t.Fatalf("expected SetActiveDomain called on settings load")
+	}
+	if cmd == nil {
+		t.Fatalf("expected refresh command after applying active domain on load")
+	}
+}
+
+func TestModel_SettingsLoaded_ActiveDomainApplyFailureShowsWarning(t *testing.T) {
+	fakeRules := &fakeRulesManager{
+		domains:      []string{"example.com", "example.net"},
+		activeDomain: "example.com",
+		setActiveErr: errors.New("switch failed"),
+	}
+	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
+
+	updated, _ := m.Update(settingsLoadedMsg{state: SettingsState{ClipboardEnabled: true, ClipboardMethod: "auto", ActiveDomain: "example.net"}})
+	m = updated.(Model)
+	if m.toast == nil || m.toast.Level != ToastWarning {
+		t.Fatalf("expected warning toast on settings load active domain apply failure, got %+v", m.toast)
+	}
+	if !contains(m.toast.Message, "active domain apply") {
+		t.Fatalf("expected active domain apply warning message, got %+v", m.toast)
 	}
 }
 
