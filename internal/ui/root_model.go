@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 
 	"tuiotp/internal/app"
 	"tuiotp/internal/domain"
@@ -21,14 +22,21 @@ const (
 	defaultOTPHistoryLimit = 50
 	maxOTPQueryLen         = 120
 	maxAliasEmailLen       = 320
+	maxClipboardMethodLen  = 24
+	maxTimezoneLen         = 64
+	maxLogPathLen          = 260
+	maxPollIntervalLen     = 24
 	sidebarWidth           = 42
 )
+
+var supportedClipboardMethods = []string{"auto", "wl-copy", "xclip", "xsel", "pbcopy", "clip"}
 
 type Panel int
 
 const (
 	PanelStatus Panel = iota
 	PanelMailAccount
+	PanelSettings
 	PanelLatestOTP
 	PanelLogs
 	panelCount
@@ -56,6 +64,7 @@ type Model struct {
 
 	otpManager   otpManager
 	rulesManager rulesManager
+	settingsMgr  settingsManager
 	clipboard    clipboardCopier
 	opParentCtx  context.Context
 	opTimeout    time.Duration
@@ -71,6 +80,8 @@ type Model struct {
 
 	otpEvents      []domain.OTPEvent
 	otpSelected    int
+	otpDeleteMode  bool
+	otpDeleteScope string
 	otpSearchMode  bool
 	otpSearchInput string
 	otpSearchQuery string
@@ -82,10 +93,25 @@ type Model struct {
 	logSeq        uint64
 	logScroll     int  // lines scrolled up from bottom (0 = bottom)
 	logAutoScroll bool // true = auto-follow new lines
+
+	// Settings panel
+	settingsLoaded       bool
+	settingsLoading      bool
+	settingsSaving       bool
+	settingsSelected     int
+	settingsEditing      bool
+	settingsMethodInput  string
+	settingsTZInput      string
+	settingsLogPathInput string
+	settingsPollInput    string
+	settingsForm         SettingsState
+	settingsOriginal     SettingsState
 }
 
 type otpManager interface {
 	ListOTPEvents(ctx context.Context, filter app.OTPListFilter) ([]domain.OTPEvent, error)
+	ClearOTPEventByID(ctx context.Context, id int64) (int64, error)
+	ClearOTPEvents(ctx context.Context, filter app.OTPDeleteFilter) (int64, error)
 }
 
 type rulesManager interface {
@@ -93,6 +119,19 @@ type rulesManager interface {
 	CreateRoutingRuleDirect(ctx context.Context, in ports.CreateRoutingRuleInput) (ports.RoutingRule, error)
 	UpdateRoutingRule(ctx context.Context, in ports.UpdateRoutingRuleInput) (ports.RoutingRule, error)
 	DeleteRoutingRuleByID(ctx context.Context, ruleID string) error
+}
+
+type SettingsState struct {
+	ClipboardEnabled bool
+	ClipboardMethod  string
+	Timezone         string
+	LogPath          string
+	IMAPPollInterval string
+}
+
+type settingsManager interface {
+	Load(ctx context.Context) (SettingsState, error)
+	SaveAndApply(ctx context.Context, state SettingsState) (SettingsState, clipboardCopier, error)
 }
 
 type clipboardCopier = ports.Clipboard
@@ -147,6 +186,7 @@ func showToast(m *Model, level ToastLevel, message string) tea.Cmd {
 type ModelConfig struct {
 	OTPManager   otpManager
 	RulesManager rulesManager
+	SettingsMgr  settingsManager
 	Clipboard    clipboardCopier
 	LogBuffer    logBufferReader
 	Health       HealthStatus
@@ -180,6 +220,7 @@ func NewModelWithConfig(cfg ModelConfig) Model {
 		health:        normalizeHealthStatus(cfg.Health),
 		otpManager:    cfg.OTPManager,
 		rulesManager:  cfg.RulesManager,
+		settingsMgr:   cfg.SettingsMgr,
 		clipboard:     cfg.Clipboard,
 		opParentCtx:   cfg.ParentCtx,
 		opTimeout:     cfg.OpTimeout,
@@ -199,6 +240,10 @@ func (m Model) Init() tea.Cmd {
 	}
 	if m.logBuffer != nil {
 		cmds = append(cmds, m.logTickCmd())
+	}
+	if m.settingsMgr != nil {
+		m.settingsLoading = true
+		cmds = append(cmds, m.loadSettingsCmd())
 	}
 
 	if len(cmds) == 0 {
@@ -260,6 +305,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		toastCmd := showToast(&m, ToastSuccess, "otp copied")
 		return m, toastCmd
 
+	case otpDeletedMsg:
+		if msg.err != nil {
+			toastCmd := showToast(&m, ToastError, userSafeError("clear otp", msg.err))
+			return m, toastCmd
+		}
+		reqAt := time.Now().UTC()
+		m.otpLastReqAt = reqAt
+		label := "otp cleared"
+		switch msg.scope {
+		case "selected":
+			label = "selected otp cleared"
+		case "filtered":
+			label = "filtered otp cleared"
+		case "all":
+			label = "all otp cleared"
+		}
+		toastCmd := showToast(&m, ToastSuccess, fmt.Sprintf("%s (%d)", label, msg.rows))
+		return m, tea.Batch(toastCmd, m.refreshOTPHistoryCmdAt(m.otpSearchQuery, reqAt))
+
 	case cfRulesLoadedMsg:
 		if msg.err != nil {
 			toastCmd := showToast(&m, ToastError, userSafeError("refresh mail accounts", msg.err))
@@ -307,6 +371,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		toastCmd := showToast(&m, ToastSuccess, "mail account deleted")
 		return m, tea.Batch(toastCmd, m.refreshCFRulesCmd())
 
+	case settingsLoadedMsg:
+		m.settingsLoading = false
+		if msg.err != nil {
+			m.settingsLoaded = false
+			toastCmd := showToast(&m, ToastError, userSafeError("load settings", msg.err))
+			return m, toastCmd
+		}
+		m.settingsLoaded = true
+		m.settingsForm = normalizeSettingsState(msg.state)
+		m.settingsOriginal = m.settingsForm
+		m.settingsMethodInput = m.settingsForm.ClipboardMethod
+		m.settingsTZInput = m.settingsForm.Timezone
+		m.settingsLogPathInput = m.settingsForm.LogPath
+		m.settingsPollInput = m.settingsForm.IMAPPollInterval
+		m.settingsEditing = false
+		return m, nil
+
+	case settingsSavedMsg:
+		m.settingsSaving = false
+		if msg.err != nil {
+			toastCmd := showToast(&m, ToastError, userSafeError("save settings", msg.err))
+			return m, toastCmd
+		}
+		m.settingsLoaded = true
+		m.settingsForm = normalizeSettingsState(msg.state)
+		m.settingsOriginal = m.settingsForm
+		m.settingsMethodInput = m.settingsForm.ClipboardMethod
+		m.settingsTZInput = m.settingsForm.Timezone
+		m.settingsLogPathInput = m.settingsForm.LogPath
+		m.settingsPollInput = m.settingsForm.IMAPPollInterval
+		m.settingsEditing = false
+		m.clipboard = msg.clipboard
+		toastCmd := showToast(&m, ToastSuccess, "settings saved and applied")
+		return m, toastCmd
+
 	case app.RuntimeEvent:
 		switch msg.Type {
 		case app.RuntimeEventWatcherUpdate:
@@ -325,6 +424,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			toastCmd := showToast(&m, ToastError, errMsg)
 			return m, toastCmd
+		case app.RuntimeEventOTPProcessed:
+			if msg.OTPStatus == app.OTPPipelineStatusStored {
+				reqAt := time.Now().UTC()
+				m.otpLastReqAt = reqAt
+				return m, m.refreshOTPHistoryCmdAt(m.otpSearchQuery, reqAt)
+			}
+			return m, nil
 		}
 
 	case logTickMsg:
@@ -365,6 +471,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return updated, cmd
 			}
 		}
+		if m.ActivePanel == PanelSettings {
+			updated, cmd, handled := m.updateSettingsPanel(msg)
+			if handled {
+				return updated, cmd
+			}
+		}
 		if m.ActivePanel == PanelLatestOTP {
 			updated, cmd, handled := m.updateOTPPanel(msg)
 			if handled {
@@ -390,6 +502,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "l":
 			m.ActivePanel = PanelLogs
+			return m, nil
+		case "s":
+			m.ActivePanel = PanelSettings
+			if m.settingsMgr != nil && !m.settingsLoaded && !m.settingsLoading {
+				m.settingsLoading = true
+				return m, m.loadSettingsCmd()
+			}
 			return m, nil
 		}
 	}
@@ -449,11 +568,6 @@ func newTheme() theme {
 func (m Model) View() string {
 	th := newTheme()
 
-	// Full-screen root — no extra padding, we control every pixel
-	root := lipgloss.NewStyle().
-		Background(th.bg).
-		Foreground(th.fg)
-
 	totalH := m.Height
 	if totalH <= 0 {
 		totalH = 24
@@ -461,6 +575,14 @@ func (m Model) View() string {
 	totalW := m.Width
 	if totalW <= 0 {
 		totalW = 100
+	}
+
+	// Full-screen root — paint full terminal background (non-transparent)
+	root := lipgloss.NewStyle().
+		Background(th.bg).
+		Foreground(th.fg)
+	if totalW < 36 || totalH < 10 {
+		return m.renderMinimalView(th, totalW, totalH)
 	}
 
 	// ── Top bar (header + tab bar) ────────────────────────────────────────
@@ -489,32 +611,53 @@ func (m Model) View() string {
 
 	// Reserve rows: topBar + footer + help (if open) + toast (if visible)
 	bodyH := totalH - topBarH - footerH - helpH - toastH
-	if bodyH < 4 {
-		bodyH = 4
+	if bodyH < 10 {
+		return m.renderMinimalView(th, totalW, totalH)
 	}
 
-	// ── Sidebar (right): Health + Mail Account ──────────────────────────
-	sbW := sidebarWidth
-	mainW := totalW - sbW - 1 // 1 col for border separator
-	if mainW < 20 {
-		// Narrow terminal: shrink sidebar to give main content room
-		sbW = totalW - 20 - 1
-		if sbW < 20 {
-			sbW = 20
+	// ── Body layout responsive: horizontal / stacked / single (small) ────
+	const minMainW = 36
+	const minSidebarW = 24
+	const singleModeMaxW = 80
+	const horizontalModeMinW = 100
+	singleMode := totalW <= singleModeMaxW || bodyH < 16
+	horizontal := totalW >= horizontalModeMinW
+
+	var body string
+	if singleMode {
+		body = m.renderSinglePanelBody(th, totalW, bodyH)
+	} else if horizontal {
+		sbW := sidebarWidth
+		mainW := totalW - sbW - 1 // 1 col for separator
+		if mainW < minMainW {
+			sbW = totalW - minMainW - 1
+			if sbW < minSidebarW {
+				sbW = minSidebarW
+			}
+			mainW = totalW - sbW - 1
 		}
-		mainW = totalW - sbW - 1
-		if mainW < 10 {
-			mainW = 10
+
+		sidebar := m.renderSidebar(th, sbW, bodyH, true)
+		mainContent := m.renderMainContent(th, mainW, bodyH)
+		body = lipgloss.JoinHorizontal(lipgloss.Top, mainContent, sidebar)
+	} else {
+		mainH := bodyH * 65 / 100
+		if mainH < 6 {
+			mainH = 6
 		}
+		sidebarH := bodyH - mainH
+		if sidebarH < 5 {
+			sidebarH = 5
+			mainH = bodyH - sidebarH
+			if mainH < 4 {
+				mainH = 4
+			}
+		}
+
+		mainContent := m.renderMainContent(th, totalW, mainH)
+		sidebar := m.renderSidebar(th, totalW, sidebarH, false)
+		body = lipgloss.JoinVertical(lipgloss.Left, mainContent, sidebar)
 	}
-
-	sidebar := m.renderSidebar(th, sbW, bodyH)
-
-	// ── Main content (left): OTP + Logs ─────────────────────────────────
-	mainContent := m.renderMainContent(th, mainW, bodyH)
-
-	// ── Body row ─────────────────────────────────────────────────────────
-	body := lipgloss.JoinHorizontal(lipgloss.Top, mainContent, sidebar)
 
 	// ── Assemble final output ────────────────────────────────────────────
 	parts := []string{topBar, body}
@@ -534,23 +677,109 @@ func (m Model) View() string {
 	lines := strings.Split(rendered, "\n")
 	if len(lines) > totalH {
 		lines = lines[:totalH]
-		rendered = strings.Join(lines, "\n")
 	}
+	padBg := lipgloss.NewStyle().Background(th.bg)
+	for i := range lines {
+		if lipgloss.Width(lines[i]) > totalW {
+			lines[i] = xansi.Truncate(lines[i], totalW, "")
+		}
+		w := lipgloss.Width(lines[i])
+		if w < totalW {
+			lines[i] += padBg.Render(strings.Repeat(" ", totalW-w))
+		}
+	}
+	if len(lines) < totalH {
+		blank := lipgloss.NewStyle().Background(th.bg).Width(totalW).Render("")
+		for len(lines) < totalH {
+			lines = append(lines, blank)
+		}
+	}
+	rendered = strings.Join(lines, "\n")
 
 	return rendered
+}
+
+func (m Model) renderSinglePanelBody(th theme, w, h int) string {
+	if h < 6 {
+		h = 6
+	}
+
+	switch m.ActivePanel {
+	case PanelLatestOTP:
+		return m.renderOTPCard(th, w, h)
+	case PanelLogs:
+		return m.renderLogsCard(th, w, h)
+	case PanelMailAccount:
+		return m.renderMailAccountCard(th, w, h)
+	case PanelSettings:
+		return m.renderSettingsCard(th, w, h)
+	default:
+		return m.renderHealthCard(th, w)
+	}
+}
+
+func (m Model) renderMinimalView(th theme, totalW, totalH int) string {
+	if totalW <= 0 {
+		totalW = 36
+	}
+	if totalH <= 0 {
+		totalH = 10
+	}
+
+	lines := []string{
+		truncate("⚡ TUIOTP", totalW),
+		truncate("Resize terminal for full dashboard", totalW),
+		truncate(fmt.Sprintf("OTP events: %d", len(m.otpEvents)), totalW),
+		truncate("keys: q quit  r refresh  o otp", totalW),
+	}
+	out := strings.Join(lines, "\n")
+	rendered := lipgloss.NewStyle().Background(th.bg).Foreground(th.fg).Width(totalW).Render(out)
+	s := strings.Split(rendered, "\n")
+	if len(s) > totalH {
+		s = s[:totalH]
+	}
+	if len(s) < totalH {
+		blank := lipgloss.NewStyle().Background(th.bg).Width(totalW).Render("")
+		for len(s) < totalH {
+			s = append(s, blank)
+		}
+	}
+	return strings.Join(s, "\n")
 }
 
 // ── Top bar: logo + clock + tab bar ──────────────────────────────────────────
 
 func (m Model) renderTopBar(th theme, totalW int) string {
 	// Logo (single line, compact)
-	logo := th.accentStyle.Render("⚡ TUIOTP") +
-		th.mutedStyle.Render("  OTP Dashboard · Cloudflare Email · IMAP")
+	brand := "⚡ TUIOTP"
+	tagline := "OTP Dashboard · Cloudflare Email · IMAP"
 
 	now := time.Now().UTC().Format("15:04:05 UTC")
 	clock := lipgloss.NewStyle().
 		Foreground(th.accent).
 		Render(now)
+	if totalW < 24 {
+		return lipgloss.NewStyle().
+			Background(th.bgAlt).
+			Width(totalW).
+			Render(now)
+	}
+
+	logoText := brand + "  " + tagline
+	maxLogoW := totalW - lipgloss.Width(clock) - 3
+	if maxLogoW < 8 {
+		maxLogoW = 8
+	}
+	if lipgloss.Width(logoText) > maxLogoW {
+		logoText = truncate(logoText, maxLogoW)
+	}
+	logo := th.accentStyle.Render(brand)
+	if strings.HasPrefix(logoText, brand) {
+		rest := strings.TrimPrefix(logoText, brand)
+		logo += th.mutedStyle.Render(rest)
+	} else {
+		logo = th.mutedStyle.Render(logoText)
+	}
 
 	// Push clock to right
 	logoW := lipgloss.Width(logo)
@@ -580,6 +809,7 @@ func (m Model) renderTabBar(th theme, totalW int) string {
 		{PanelLatestOTP, "OTP", "⚡"},
 		{PanelLogs, "Logs", "≡"},
 		{PanelMailAccount, "Mail Account", "☁"},
+		{PanelSettings, "Settings", "⚙"},
 		{PanelStatus, "Health", "◈"},
 	}
 
@@ -613,6 +843,34 @@ func (m Model) renderTabBar(th theme, totalW int) string {
 
 	tabRow := strings.Join(parts, "")
 	tabW := lipgloss.Width(tabRow)
+	if tabW > totalW {
+		compact := make([]string, 0, len(tabs))
+		for _, t := range tabs {
+			label := t.icon
+			if m.ActivePanel == t.panel {
+				compact = append(compact, activeTabSt.Render(label))
+			} else {
+				compact = append(compact, inactiveTabSt.Render(label))
+			}
+		}
+		tabRow = strings.Join(compact, " ")
+		tabW = lipgloss.Width(tabRow)
+		if tabW > totalW {
+			shortParts := make([]string, 0, len(tabs))
+			for _, t := range tabs {
+				if m.ActivePanel == t.panel {
+					shortParts = append(shortParts, "["+t.icon+"]")
+				} else {
+					shortParts = append(shortParts, t.icon)
+				}
+			}
+			plain := truncate(strings.Join(shortParts, " "), totalW)
+			return lipgloss.NewStyle().
+				Background(lipgloss.Color("235")).
+				Width(totalW).
+				Render(plain)
+		}
+	}
 	pad := ""
 	if totalW > tabW {
 		pad = lipgloss.NewStyle().
@@ -625,8 +883,14 @@ func (m Model) renderTabBar(th theme, totalW int) string {
 
 // ── Sidebar (right): Health card stacked on Mail Account card ────────────────
 
-func (m Model) renderSidebar(th theme, w, totalH int) string {
-	innerW := w - 2 // account for left border char + gap
+func (m Model) renderSidebar(th theme, w, totalH int, withLeftSeparator bool) string {
+	innerW := w
+	if withLeftSeparator {
+		innerW = w - 2 // account for left border char + gap
+	}
+	if innerW < 20 {
+		innerW = 20
+	}
 
 	// Health card (fixed height ~9, includes its own border)
 	healthCard := m.renderHealthCard(th, innerW)
@@ -643,6 +907,10 @@ func (m Model) renderSidebar(th theme, w, totalH int) string {
 	mailCard := m.renderMailAccountCard(th, innerW, mailContentH)
 
 	sidebar := lipgloss.JoinVertical(lipgloss.Left, healthCard, mailCard)
+
+	if !withLeftSeparator {
+		return sidebar
+	}
 
 	// Left border line to visually separate from main content
 	borderSt := lipgloss.NewStyle().
@@ -732,9 +1000,143 @@ func (m Model) renderMailAccountCard(th theme, w, h int) string {
 	return cardSt.Render(inner)
 }
 
+func (m Model) renderSettingsCard(th theme, w, h int) string {
+	titleSt := lipgloss.NewStyle().
+		Bold(true).Foreground(th.fg).
+		Background(th.bgAlt).
+		Width(w-2).
+		Padding(0, 1)
+
+	title := titleSt.Render("⚙ Settings  " + th.mutedStyle.Render("clipboard"))
+	sepW := w - 4
+	if sepW < 1 {
+		sepW = 1
+	}
+	sep := th.mutedStyle.Render(strings.Repeat("─", sepW))
+	body := m.settingsPanelView(w - 4)
+	hint := th.mutedStyle.Render("  ↑↓ nav  space toggle  enter save+apply  r reset")
+
+	cardSt := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("238")).
+		Width(w).
+		Height(h)
+
+	if m.ActivePanel == PanelSettings {
+		cardSt = cardSt.BorderForeground(th.accent)
+	}
+
+	inner := strings.Join([]string{title, sep, "", body, "", hint}, "\n")
+	inner = clampLines(inner, h)
+	return cardSt.Render(inner)
+}
+
+func (m Model) settingsPanelView(w int) string {
+	th := newTheme()
+	if m.settingsMgr == nil {
+		return th.mutedStyle.Render("  settings manager unavailable")
+	}
+	if m.settingsLoading {
+		return th.mutedStyle.Render("  loading settings...")
+	}
+	if !m.settingsLoaded {
+		return th.warnStyle.Render("  settings not loaded  ·  press r")
+	}
+	if m.settingsSaving {
+		return th.mutedStyle.Render("  saving and applying settings...")
+	}
+
+	method := strings.TrimSpace(m.settingsForm.ClipboardMethod)
+	if m.settingsEditing {
+		if m.settingsSelected == 1 {
+			method = m.settingsMethodInput
+		}
+	}
+	if strings.TrimSpace(method) == "" {
+		method = "auto"
+	}
+	tz := strings.TrimSpace(m.settingsForm.Timezone)
+	if m.settingsEditing && m.settingsSelected == 2 {
+		tz = m.settingsTZInput
+	}
+	if tz == "" {
+		tz = "local"
+	}
+	logPath := strings.TrimSpace(m.settingsForm.LogPath)
+	if m.settingsEditing && m.settingsSelected == 3 {
+		logPath = m.settingsLogPathInput
+	}
+	if logPath == "" {
+		logPath = "stderr"
+	}
+	poll := strings.TrimSpace(m.settingsForm.IMAPPollInterval)
+	if m.settingsEditing && m.settingsSelected == 4 {
+		poll = m.settingsPollInput
+	}
+	if poll == "" {
+		poll = "5s"
+	}
+	enabledLabel := "off"
+	if m.settingsForm.ClipboardEnabled {
+		enabledLabel = "on"
+	}
+
+	row := func(active bool, label, value string) string {
+		cursor := "  "
+		labelSt := th.mutedStyle
+		valueSt := th.base
+		if active {
+			cursor = th.accentStyle.Render("▶ ")
+			labelSt = th.accentStyle.Copy().Bold(false)
+			valueSt = th.bold
+		}
+		return cursor + labelSt.Render(fmt.Sprintf("%-18s", label)) + valueSt.Render(value)
+	}
+
+	methodValue := method
+	if m.settingsEditing {
+		methodValue += "▌"
+	}
+
+	lines := []string{
+		th.bold.Render("  Clipboard"),
+		"",
+		row(m.settingsSelected == 0, "enabled", enabledLabel),
+		row(m.settingsSelected == 1, "method", methodValue),
+		row(m.settingsSelected == 2, "timezone", func() string {
+			if m.settingsEditing && m.settingsSelected == 2 {
+				return tz + "▌"
+			}
+			return tz
+		}()),
+		row(m.settingsSelected == 3, "log_path", func() string {
+			if m.settingsEditing && m.settingsSelected == 3 {
+				return logPath + "▌"
+			}
+			return logPath
+		}()),
+		row(m.settingsSelected == 4, "imap.poll_interval", func() string {
+			if m.settingsEditing && m.settingsSelected == 4 {
+				return poll + "▌"
+			}
+			return poll
+		}()),
+		"",
+		th.mutedStyle.Render("  supported: " + strings.Join(supportedClipboardMethods, ", ")),
+	}
+	if m.settingsEditing {
+		lines = append(lines, th.mutedStyle.Render("  editing method: enter done  esc cancel  backspace delete"))
+	}
+	return strings.Join(lines, "\n")
+}
+
 // ── Main content (left): OTP panel on top, Logs below ────────────────────────
 
 func (m Model) renderMainContent(th theme, w, totalH int) string {
+	if m.ActivePanel == PanelSettings {
+		return m.renderSettingsCard(th, w, totalH)
+	}
+
 	// Each card has RoundedBorder which adds 2 rows (top+bottom) outside
 	// the content Height. We have 2 cards, so 4 border rows total.
 	const borderRows = 2 // per card
@@ -876,10 +1278,12 @@ func (m Model) renderFooter(th theme, totalW int) string {
 		{"?", "help"},
 		{"r", "refresh"},
 		{"tab", "panel"},
+		{"s", "settings"},
 		{"o", "otp"},
 		{"l", "logs"},
 		{"/", "search"},
 		{"c", "copy"},
+		{"x/X/C", "clear"},
 	}
 
 	kSt := lipgloss.NewStyle().
@@ -984,9 +1388,15 @@ func (m Model) renderHelp(th theme) string {
 		col("tab", "cycle panels"),
 		col("o", "jump to OTP panel"),
 		col("l", "jump to Logs panel"),
+		col("s", "jump to Settings panel"),
 		col("/", "search OTP events"),
 		col("G", "jump to bottom (logs)"),
+		col("space", "toggle setting value"),
+		col("enter", "save+apply settings"),
 		col("c", "copy selected OTP"),
+		col("x", "clear selected OTP"),
+		col("X", "clear OTP by current filter"),
+		col("C", "clear all OTP"),
 		col("n", "new mail account (routing rule)"),
 		col("d", "delete mail account"),
 		col("e", "toggle mail account enable/disable"),
@@ -1074,8 +1484,19 @@ func (m Model) otpTimelineView(w int) string {
 		lines = append(lines, line)
 	}
 
+	if m.otpDeleteMode {
+		scope := "selected"
+		switch m.otpDeleteScope {
+		case "filtered":
+			scope = "filtered"
+		case "all":
+			scope = "all"
+		}
+		lines = append(lines, th.warnStyle.Render(fmt.Sprintf("  clear %s OTP?  y confirm  n/esc cancel", scope)))
+	}
+
 	lines = append(lines, sep)
-	lines = append(lines, th.mutedStyle.Render("  ↑↓/jk nav  ·  c copy  ·  / search  ·  esc clear"))
+	lines = append(lines, th.mutedStyle.Render("  ↑↓/jk nav  ·  c copy  ·  x/X/C clear  ·  / search  ·  esc clear"))
 
 	return strings.Join(lines, "\n")
 }
@@ -1127,6 +1548,8 @@ func panelLabel(p Panel) string {
 		return "status"
 	case PanelMailAccount:
 		return "mail_account"
+	case PanelSettings:
+		return "settings"
 	case PanelLatestOTP:
 		return "latest_otp"
 	case PanelLogs:
@@ -1145,6 +1568,12 @@ type otpHistoryLoadedMsg struct {
 
 type otpCopiedMsg struct {
 	err error
+}
+
+type otpDeletedMsg struct {
+	rows  int64
+	scope string
+	err   error
 }
 
 type cfRulesLoadedMsg struct {
@@ -1166,6 +1595,17 @@ type cfRuleDeletedMsg struct {
 	err error
 }
 
+type settingsLoadedMsg struct {
+	state SettingsState
+	err   error
+}
+
+type settingsSavedMsg struct {
+	state     SettingsState
+	clipboard clipboardCopier
+	err       error
+}
+
 type logTickMsg struct{}
 
 type toastTickMsg struct{}
@@ -1178,6 +1618,86 @@ func (m Model) logTickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(_ time.Time) tea.Msg {
 		return logTickMsg{}
 	})
+}
+
+func defaultSettingsState() SettingsState {
+	return SettingsState{ClipboardEnabled: true, ClipboardMethod: "auto"}
+}
+
+func normalizeSettingsState(in SettingsState) SettingsState {
+	out := in
+	out.ClipboardMethod = strings.ToLower(strings.TrimSpace(out.ClipboardMethod))
+	if out.ClipboardMethod == "" || !isSupportedClipboardMethod(out.ClipboardMethod) {
+		out.ClipboardMethod = "auto"
+	}
+	out.Timezone = strings.TrimSpace(out.Timezone)
+	if utf8.RuneCountInString(out.Timezone) > maxTimezoneLen {
+		r := []rune(out.Timezone)
+		out.Timezone = string(r[:maxTimezoneLen])
+	}
+	out.LogPath = strings.TrimSpace(out.LogPath)
+	if utf8.RuneCountInString(out.LogPath) > maxLogPathLen {
+		r := []rune(out.LogPath)
+		out.LogPath = string(r[:maxLogPathLen])
+	}
+	out.IMAPPollInterval = strings.TrimSpace(out.IMAPPollInterval)
+	if utf8.RuneCountInString(out.IMAPPollInterval) > maxPollIntervalLen {
+		r := []rune(out.IMAPPollInterval)
+		out.IMAPPollInterval = string(r[:maxPollIntervalLen])
+	}
+	return out
+}
+
+func isSupportedClipboardMethod(method string) bool {
+	method = strings.ToLower(strings.TrimSpace(method))
+	for _, allowed := range supportedClipboardMethods {
+		if method == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func (m Model) currentSettingsState() SettingsState {
+	state := m.settingsForm
+	if m.settingsEditing {
+		switch m.settingsSelected {
+		case 1:
+			state.ClipboardMethod = m.settingsMethodInput
+		case 2:
+			state.Timezone = m.settingsTZInput
+		case 3:
+			state.LogPath = m.settingsLogPathInput
+		case 4:
+			state.IMAPPollInterval = m.settingsPollInput
+		}
+	}
+	return normalizeSettingsState(state)
+}
+
+func (m Model) loadSettingsCmd() tea.Cmd {
+	if m.settingsMgr == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.opContext(), m.opTimeout)
+		defer cancel()
+		state, err := m.settingsMgr.Load(ctx)
+		return settingsLoadedMsg{state: normalizeSettingsState(state), err: err}
+	}
+}
+
+func (m Model) saveSettingsCmd() tea.Cmd {
+	if m.settingsMgr == nil {
+		return nil
+	}
+	state := m.currentSettingsState()
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.opContext(), m.opTimeout)
+		defer cancel()
+		next, clip, err := m.settingsMgr.SaveAndApply(ctx, state)
+		return settingsSavedMsg{state: normalizeSettingsState(next), clipboard: clip, err: err}
+	}
 }
 
 func (m Model) refreshOTPHistoryCmd(query string) tea.Cmd {
@@ -1196,6 +1716,40 @@ func (m Model) copyOTPCmd(otpCode string) tea.Cmd {
 
 		err := m.clipboard.Copy(ctx, otpCode)
 		return otpCopiedMsg{err: err}
+	}
+}
+
+func (m Model) clearOTPByIDCmd(id int64) tea.Cmd {
+	if m.otpManager == nil {
+		return nil
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.opContext(), m.opTimeout)
+		defer cancel()
+
+		rows, err := m.otpManager.ClearOTPEventByID(ctx, id)
+		return otpDeletedMsg{rows: rows, scope: "selected", err: err}
+	}
+}
+
+func (m Model) clearOTPByScopeCmd(scope string) tea.Cmd {
+	if m.otpManager == nil {
+		return nil
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.opContext(), m.opTimeout)
+		defer cancel()
+
+		filter := app.OTPDeleteFilter{}
+		if scope == "filtered" {
+			filter.Query = strings.TrimSpace(m.otpSearchQuery)
+		} else if scope == "all" {
+			filter.AllowDeleteAll = true
+		}
+		rows, err := m.otpManager.ClearOTPEvents(ctx, filter)
+		return otpDeletedMsg{rows: rows, scope: scope, err: err}
 	}
 }
 
@@ -1435,6 +1989,173 @@ func (m Model) updateMailAccountPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	return m, nil, false
 }
 
+func (m Model) updateSettingsPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
+	key := msg.String()
+	if key == "ctrl+c" {
+		return m, tea.Quit, true
+	}
+	if m.settingsMgr == nil {
+		if key == "r" {
+			toastCmd := showToast(&m, ToastWarning, "settings manager unavailable")
+			return m, toastCmd, true
+		}
+		return m, nil, false
+	}
+	if m.settingsSaving {
+		return m, nil, true
+	}
+
+	if m.settingsEditing {
+		switch key {
+		case "esc":
+			m.settingsEditing = false
+			m.settingsMethodInput = m.settingsForm.ClipboardMethod
+			m.settingsTZInput = m.settingsForm.Timezone
+			m.settingsLogPathInput = m.settingsForm.LogPath
+			m.settingsPollInput = m.settingsForm.IMAPPollInterval
+			return m, nil, true
+		case "enter":
+			m.settingsEditing = false
+			switch m.settingsSelected {
+			case 1:
+				m.settingsForm.ClipboardMethod = strings.TrimSpace(m.settingsMethodInput)
+				if m.settingsForm.ClipboardMethod == "" || !isSupportedClipboardMethod(m.settingsForm.ClipboardMethod) {
+					m.settingsForm.ClipboardMethod = "auto"
+				}
+			case 2:
+				m.settingsForm.Timezone = strings.TrimSpace(m.settingsTZInput)
+				if utf8.RuneCountInString(m.settingsForm.Timezone) > maxTimezoneLen {
+					r := []rune(m.settingsForm.Timezone)
+					m.settingsForm.Timezone = string(r[:maxTimezoneLen])
+				}
+			case 3:
+				m.settingsForm.LogPath = strings.TrimSpace(m.settingsLogPathInput)
+				if utf8.RuneCountInString(m.settingsForm.LogPath) > maxLogPathLen {
+					r := []rune(m.settingsForm.LogPath)
+					m.settingsForm.LogPath = string(r[:maxLogPathLen])
+				}
+			case 4:
+				m.settingsForm.IMAPPollInterval = strings.TrimSpace(m.settingsPollInput)
+				if utf8.RuneCountInString(m.settingsForm.IMAPPollInterval) > maxPollIntervalLen {
+					r := []rune(m.settingsForm.IMAPPollInterval)
+					m.settingsForm.IMAPPollInterval = string(r[:maxPollIntervalLen])
+				}
+			}
+			return m, nil, true
+		case "backspace":
+			if m.settingsSelected == 2 {
+				m.settingsTZInput = trimLastRune(m.settingsTZInput)
+			} else if m.settingsSelected == 3 {
+				m.settingsLogPathInput = trimLastRune(m.settingsLogPathInput)
+			} else if m.settingsSelected == 4 {
+				m.settingsPollInput = trimLastRune(m.settingsPollInput)
+			} else {
+				m.settingsMethodInput = trimLastRune(m.settingsMethodInput)
+			}
+			return m, nil, true
+		default:
+			if len(msg.Runes) > 0 {
+				r := msg.Runes[0]
+				if r >= 32 && r != 127 {
+					if m.settingsSelected == 2 {
+						if utf8.RuneCountInString(m.settingsTZInput) < maxTimezoneLen {
+							m.settingsTZInput += string(r)
+						}
+					} else if m.settingsSelected == 3 {
+						if utf8.RuneCountInString(m.settingsLogPathInput) < maxLogPathLen {
+							m.settingsLogPathInput += string(r)
+						}
+					} else if m.settingsSelected == 4 {
+						if utf8.RuneCountInString(m.settingsPollInput) < maxPollIntervalLen {
+							m.settingsPollInput += string(r)
+						}
+					} else if utf8.RuneCountInString(m.settingsMethodInput) < maxClipboardMethodLen {
+						m.settingsMethodInput += string(r)
+					}
+				}
+			}
+			return m, nil, true
+		}
+	}
+
+	switch key {
+	case "up", "k":
+		if m.settingsSelected > 0 {
+			m.settingsSelected--
+		}
+		return m, nil, true
+	case "down", "j":
+		if m.settingsSelected < 4 {
+			m.settingsSelected++
+		}
+		return m, nil, true
+	case " ":
+		if m.settingsSelected == 0 {
+			m.settingsForm.ClipboardEnabled = !m.settingsForm.ClipboardEnabled
+			return m, nil, true
+		}
+		m.settingsEditing = true
+		if m.settingsSelected == 2 {
+			m.settingsTZInput = m.settingsForm.Timezone
+		} else if m.settingsSelected == 3 {
+			m.settingsLogPathInput = m.settingsForm.LogPath
+		} else if m.settingsSelected == 4 {
+			m.settingsPollInput = m.settingsForm.IMAPPollInterval
+		} else {
+			m.settingsMethodInput = m.settingsForm.ClipboardMethod
+		}
+		return m, nil, true
+	case "e":
+		if m.settingsSelected == 0 {
+			m.settingsForm.ClipboardEnabled = !m.settingsForm.ClipboardEnabled
+			return m, nil, true
+		}
+		m.settingsEditing = true
+		if m.settingsSelected == 2 {
+			m.settingsTZInput = m.settingsForm.Timezone
+		} else if m.settingsSelected == 3 {
+			m.settingsLogPathInput = m.settingsForm.LogPath
+		} else if m.settingsSelected == 4 {
+			m.settingsPollInput = m.settingsForm.IMAPPollInterval
+		} else {
+			m.settingsMethodInput = m.settingsForm.ClipboardMethod
+		}
+		return m, nil, true
+	case "enter":
+		if !m.settingsLoaded || m.settingsLoading {
+			toastCmd := showToast(&m, ToastWarning, "settings not loaded yet")
+			return m, toastCmd, true
+		}
+		m.settingsSaving = true
+		toastCmd := showToast(&m, ToastInfo, "saving settings...")
+		return m, tea.Batch(toastCmd, m.saveSettingsCmd()), true
+	case "S":
+		if !m.settingsLoaded || m.settingsLoading {
+			toastCmd := showToast(&m, ToastWarning, "settings not loaded yet")
+			return m, toastCmd, true
+		}
+		m.settingsSaving = true
+		toastCmd := showToast(&m, ToastInfo, "saving settings...")
+		return m, tea.Batch(toastCmd, m.saveSettingsCmd()), true
+	case "r":
+		if !m.settingsLoaded {
+			m.settingsLoading = true
+			toastCmd := showToast(&m, ToastInfo, "loading settings...")
+			return m, tea.Batch(toastCmd, m.loadSettingsCmd()), true
+		}
+		m.settingsForm = m.settingsOriginal
+		m.settingsMethodInput = m.settingsForm.ClipboardMethod
+		m.settingsTZInput = m.settingsForm.Timezone
+		m.settingsLogPathInput = m.settingsForm.LogPath
+		m.settingsPollInput = m.settingsForm.IMAPPollInterval
+		m.settingsEditing = false
+		toastCmd := showToast(&m, ToastInfo, "settings reset")
+		return m, toastCmd, true
+	}
+
+	return m, nil, false
+}
+
 func (m Model) mailAccountPanelView(w int) string {
 	th := newTheme()
 
@@ -1530,6 +2251,43 @@ func (m Model) updateOTPPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		return m, tea.Quit, true
 	}
 
+	if m.otpDeleteMode {
+		switch key {
+		case "y", "enter":
+			scope := m.otpDeleteScope
+			m.otpDeleteMode = false
+			m.otpDeleteScope = ""
+			switch scope {
+			case "selected":
+				if len(m.otpEvents) == 0 {
+					toastCmd := showToast(&m, ToastWarning, "no otp to clear")
+					return m, toastCmd, true
+				}
+				idx := m.otpSelected
+				if idx < 0 || idx >= len(m.otpEvents) {
+					idx = 0
+				}
+				toastCmd := showToast(&m, ToastInfo, "clearing selected otp...")
+				return m, tea.Batch(toastCmd, m.clearOTPByIDCmd(m.otpEvents[idx].ID)), true
+			case "filtered":
+				toastCmd := showToast(&m, ToastInfo, "clearing filtered otp...")
+				return m, tea.Batch(toastCmd, m.clearOTPByScopeCmd("filtered")), true
+			case "all":
+				toastCmd := showToast(&m, ToastInfo, "clearing all otp...")
+				return m, tea.Batch(toastCmd, m.clearOTPByScopeCmd("all")), true
+			default:
+				return m, nil, true
+			}
+		case "n", "esc":
+			m.otpDeleteMode = false
+			m.otpDeleteScope = ""
+			toastCmd := showToast(&m, ToastInfo, "clear cancelled")
+			return m, toastCmd, true
+		default:
+			return m, nil, true
+		}
+	}
+
 	if m.otpSearchMode {
 		switch key {
 		case "esc":
@@ -1575,6 +2333,38 @@ func (m Model) updateOTPPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		evt := m.otpEvents[idx]
 		toastCmd := showToast(&m, ToastInfo, "copying otp...")
 		return m, tea.Batch(toastCmd, m.copyOTPCmd(evt.OTPCode)), true
+	case "x":
+		if len(m.otpEvents) == 0 {
+			toastCmd := showToast(&m, ToastWarning, "no otp to clear")
+			return m, toastCmd, true
+		}
+		if m.otpManager == nil {
+			toastCmd := showToast(&m, ToastWarning, "otp manager unavailable")
+			return m, toastCmd, true
+		}
+		m.otpDeleteMode = true
+		m.otpDeleteScope = "selected"
+		return m, nil, true
+	case "X":
+		if strings.TrimSpace(m.otpSearchQuery) == "" {
+			toastCmd := showToast(&m, ToastWarning, "no active filter to clear")
+			return m, toastCmd, true
+		}
+		if m.otpManager == nil {
+			toastCmd := showToast(&m, ToastWarning, "otp manager unavailable")
+			return m, toastCmd, true
+		}
+		m.otpDeleteMode = true
+		m.otpDeleteScope = "filtered"
+		return m, nil, true
+	case "C":
+		if m.otpManager == nil {
+			toastCmd := showToast(&m, ToastWarning, "otp manager unavailable")
+			return m, toastCmd, true
+		}
+		m.otpDeleteMode = true
+		m.otpDeleteScope = "all"
+		return m, nil, true
 	case "/":
 		m.otpSearchMode = true
 		m.otpSearchInput = m.otpSearchQuery
@@ -1646,19 +2436,13 @@ func (m Model) opContext() context.Context {
 	return context.Background()
 }
 
-// truncate clips a string to maxW runes, appending "…" if it was cut.
+// truncate clips a string to max display width (terminal cells),
+// appending "…" when truncated.
 func truncate(s string, maxW int) string {
 	if maxW <= 0 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) <= maxW {
-		return s
-	}
-	if maxW <= 1 {
-		return "…"
-	}
-	return string(r[:maxW-1]) + "…"
+	return xansi.Truncate(s, maxW, "…")
 }
 
 // clampLines truncates s to at most maxLines lines.

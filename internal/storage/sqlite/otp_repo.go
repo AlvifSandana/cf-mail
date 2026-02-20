@@ -28,6 +28,12 @@ func NewOTPRepository(db *sql.DB) *OTPRepository {
 	return &OTPRepository{db: db}
 }
 
+func escapedLikeQuery(v string) string {
+	v = strings.TrimSpace(strings.ToLower(v))
+	escape := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return "%" + escape.Replace(v) + "%"
+}
+
 func (r *OTPRepository) Create(ctx context.Context, in OTPEvent) (OTPEvent, error) {
 	if r == nil || r.db == nil {
 		return OTPEvent{}, fmt.Errorf("otp repository db is nil")
@@ -107,8 +113,8 @@ FROM otp_events`
 	}
 
 	if v := strings.TrimSpace(strings.ToLower(filter.Query)); v != "" {
-		clauses = append(clauses, "(LOWER(alias_email) LIKE ? OR LOWER(platform) LIKE ? OR LOWER(subject) LIKE ? OR otp_code LIKE ?)")
-		like := "%" + v + "%"
+		clauses = append(clauses, "(LOWER(alias_email) LIKE ? ESCAPE '\\' OR LOWER(platform) LIKE ? ESCAPE '\\' OR LOWER(subject) LIKE ? ESCAPE '\\' OR otp_code LIKE ? ESCAPE '\\')")
+		like := escapedLikeQuery(v)
 		args = append(args, like, like, like, like)
 	}
 
@@ -146,6 +152,80 @@ type OTPListFilter struct {
 	Platform   string
 	Query      string
 	Limit      int
+}
+
+type OTPDeleteFilter struct {
+	AliasEmail     string
+	Platform       string
+	Query          string
+	AllowDeleteAll bool
+}
+
+func (r *OTPRepository) DeleteByID(ctx context.Context, id int64) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, fmt.Errorf("otp repository db is nil")
+	}
+	if id <= 0 {
+		return 0, fmt.Errorf("id must be greater than zero")
+	}
+
+	const q = `DELETE FROM otp_events WHERE id = ?`
+	result, err := r.db.ExecContext(ctx, q, id)
+	if err != nil {
+		return 0, fmt.Errorf("delete otp_event by id: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("delete otp_event by id rows_affected: %w", err)
+	}
+
+	return rows, nil
+}
+
+func (r *OTPRepository) DeleteByFilter(ctx context.Context, filter OTPDeleteFilter) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, fmt.Errorf("otp repository db is nil")
+	}
+	base := `DELETE FROM otp_events`
+	clauses := make([]string, 0, 3)
+	args := make([]any, 0, 4)
+
+	if v := strings.TrimSpace(strings.ToLower(filter.AliasEmail)); v != "" {
+		clauses = append(clauses, "LOWER(alias_email) = ?")
+		args = append(args, v)
+	}
+
+	if v := strings.TrimSpace(filter.Platform); v != "" {
+		clauses = append(clauses, "platform = ?")
+		args = append(args, v)
+	}
+
+	if v := strings.TrimSpace(strings.ToLower(filter.Query)); v != "" {
+		like := escapedLikeQuery(v)
+		clauses = append(clauses, "(LOWER(alias_email) LIKE ? ESCAPE '\\' OR LOWER(platform) LIKE ? ESCAPE '\\' OR LOWER(subject) LIKE ? ESCAPE '\\' OR otp_code LIKE ? ESCAPE '\\')")
+		args = append(args, like, like, like, like)
+	}
+
+	q := base
+	if len(clauses) == 0 && !filter.AllowDeleteAll {
+		return 0, fmt.Errorf("refusing to delete all otp events without explicit allow flag")
+	}
+	if len(clauses) > 0 {
+		q += " WHERE " + strings.Join(clauses, " AND ")
+	}
+
+	result, err := r.db.ExecContext(ctx, q, args...)
+	if err != nil {
+		return 0, fmt.Errorf("delete otp_events by filter: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("delete otp_events by filter rows_affected: %w", err)
+	}
+
+	return rows, nil
 }
 
 func (r *OTPRepository) ExistsDuplicateWithinWindow(ctx context.Context, in OTPDuplicateCheck) (bool, error) {

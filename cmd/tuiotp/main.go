@@ -144,6 +144,7 @@ func main() {
 	p := tea.NewProgram(ui.NewModelWithConfig(ui.ModelConfig{
 		OTPManager:   tuiApp,
 		RulesManager: tuiApp.AliasService(),
+		SettingsMgr:  runtimeSettingsManager{configPath: *configPath},
 		Clipboard:    clip,
 		LogBuffer:    logRing,
 		Health: ui.HealthStatus{
@@ -331,6 +332,81 @@ type imapRuntimeRunner interface {
 
 type reconnectRuntimeRunnerAdapter struct {
 	runner imapRuntimeRunner
+}
+
+type runtimeSettingsManager struct {
+	configPath string
+}
+
+func (m runtimeSettingsManager) Load(_ context.Context) (ui.SettingsState, error) {
+	cfg, err := config.Load(m.configPath)
+	if err != nil {
+		return ui.SettingsState{}, err
+	}
+	method := strings.ToLower(strings.TrimSpace(cfg.UI.Clipboard.Method))
+	if method == "" {
+		method = "auto"
+	}
+	return ui.SettingsState{
+		ClipboardEnabled: cfg.UI.Clipboard.Enabled,
+		ClipboardMethod:  method,
+		Timezone:         strings.TrimSpace(cfg.App.Timezone),
+		LogPath:          strings.TrimSpace(cfg.App.LogPath),
+		IMAPPollInterval: strings.TrimSpace(cfg.Mailbox.IMAP.PollInterval),
+	}, nil
+}
+
+func (m runtimeSettingsManager) SaveAndApply(_ context.Context, state ui.SettingsState) (ui.SettingsState, ports.Clipboard, error) {
+	cfg, err := config.Load(m.configPath)
+	if err != nil {
+		return ui.SettingsState{}, nil, err
+	}
+
+	method := strings.ToLower(strings.TrimSpace(state.ClipboardMethod))
+	if method == "" {
+		method = "auto"
+	}
+
+	cfg.UI.Clipboard.Enabled = state.ClipboardEnabled
+	cfg.UI.Clipboard.Method = method
+	cfg.App.Timezone = strings.TrimSpace(state.Timezone)
+	cfg.App.LogPath = strings.TrimSpace(state.LogPath)
+	cfg.Mailbox.IMAP.PollInterval = strings.TrimSpace(state.IMAPPollInterval)
+
+	// Preserve env-backed secret source of truth when configured,
+	// so a settings-only save does not persist resolved secrets.
+	if strings.TrimSpace(cfg.Cloudflare.APITokenEnv) != "" {
+		cfg.Cloudflare.APIToken = ""
+	}
+	if strings.TrimSpace(cfg.Mailbox.IMAP.PasswordEnv) != "" {
+		cfg.Mailbox.IMAP.Password = ""
+	}
+
+	if err := config.Validate(cfg); err != nil {
+		return ui.SettingsState{}, nil, err
+	}
+	if err := config.Save(m.configPath, cfg); err != nil {
+		return ui.SettingsState{}, nil, err
+	}
+
+	clip, err := clipboard.New(clipboard.Config{
+		Enabled: cfg.UI.Clipboard.Enabled,
+		Method:  cfg.UI.Clipboard.Method,
+	})
+	if err != nil {
+		if !errors.Is(err, clipboard.ErrClipboardDisabled) && !errors.Is(err, clipboard.ErrClipboardUnavailable) {
+			return ui.SettingsState{}, nil, err
+		}
+		clip = nil
+	}
+
+	return ui.SettingsState{
+		ClipboardEnabled: cfg.UI.Clipboard.Enabled,
+		ClipboardMethod:  method,
+		Timezone:         strings.TrimSpace(cfg.App.Timezone),
+		LogPath:          strings.TrimSpace(cfg.App.LogPath),
+		IMAPPollInterval: strings.TrimSpace(cfg.Mailbox.IMAP.PollInterval),
+	}, clip, nil
 }
 
 func (a reconnectRuntimeRunnerAdapter) Run(ctx context.Context, onUpdate func(ports.WatchUpdate)) error {

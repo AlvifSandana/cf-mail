@@ -13,10 +13,12 @@ func Validate(cfg *Config) error {
 		return fmt.Errorf("config is nil")
 	}
 
-	if cfg.Cloudflare.APITokenEnv == "" {
-		return fmt.Errorf("cloudflare.api_token_env is required")
-	}
-	if cfg.Cloudflare.APIToken == "" {
+	token := strings.TrimSpace(cfg.Cloudflare.APIToken)
+	tokenEnv := strings.TrimSpace(cfg.Cloudflare.APITokenEnv)
+	if token == "" {
+		if tokenEnv == "" {
+			return fmt.Errorf("cloudflare.api_token or cloudflare.api_token_env is required")
+		}
 		return fmt.Errorf("cloudflare api token is empty or not set")
 	}
 	if strings.TrimSpace(cfg.Cloudflare.ZoneID) == "" {
@@ -47,10 +49,12 @@ func Validate(cfg *Config) error {
 		if cfg.Mailbox.IMAP.Username == "" {
 			return fmt.Errorf("mailbox.imap.username is required")
 		}
-		if cfg.Mailbox.IMAP.PasswordEnv == "" {
-			return fmt.Errorf("mailbox.imap.password_env is required")
-		}
-		if cfg.Mailbox.IMAP.Password == "" {
+		password := strings.TrimSpace(cfg.Mailbox.IMAP.Password)
+		passwordEnv := strings.TrimSpace(cfg.Mailbox.IMAP.PasswordEnv)
+		if password == "" {
+			if passwordEnv == "" {
+				return fmt.Errorf("mailbox.imap.password or mailbox.imap.password_env is required")
+			}
 			return fmt.Errorf("imap password is empty or not set")
 		}
 		if !cfg.Mailbox.IMAP.TLS {
@@ -93,6 +97,22 @@ func Validate(cfg *Config) error {
 			if _, err := regexp.Compile(r.SubjectRegex); err != nil {
 				return fmt.Errorf("invalid otp.rules[%d].subject_regex: %w", i, err)
 			}
+		}
+	}
+
+	method := strings.ToLower(strings.TrimSpace(cfg.UI.Clipboard.Method))
+	if method == "" {
+		method = "auto"
+	}
+	switch method {
+	case "auto", "wl-copy", "xclip", "xsel", "pbcopy", "clip":
+	default:
+		return fmt.Errorf("ui.clipboard.method is unsupported: %q", cfg.UI.Clipboard.Method)
+	}
+
+	if tz := strings.TrimSpace(cfg.App.Timezone); tz != "" {
+		if _, err := time.LoadLocation(tz); err != nil {
+			return fmt.Errorf("app.timezone is invalid: %w", err)
 		}
 	}
 

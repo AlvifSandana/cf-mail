@@ -212,3 +212,288 @@ func TestOTPRepository_CreateValidation(t *testing.T) {
 		t.Fatalf("expected validation error when alias_email missing")
 	}
 }
+
+func TestOTPRepository_DeleteByID(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	repo := NewOTPRepository(db)
+	ctx := context.Background()
+
+	created, err := repo.Create(ctx, OTPEvent{
+		AliasEmail: "delete-id@example.com",
+		Platform:   "SHOP",
+		OTPCode:    "111111",
+		ReceivedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	rows, err := repo.DeleteByID(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("DeleteByID() error = %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("expected 1 affected row, got %d", rows)
+	}
+
+	left, err := repo.List(ctx, OTPListFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(left) != 0 {
+		t.Fatalf("expected no rows after delete by id, got %d", len(left))
+	}
+}
+
+func TestOTPRepository_DeleteByFilter(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	repo := NewOTPRepository(db)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	seed := []OTPEvent{
+		{AliasEmail: "a@example.com", Platform: "SHOP", OTPCode: "111111", Subject: "tokoped code", ReceivedAt: now},
+		{AliasEmail: "b@example.com", Platform: "BANK", OTPCode: "222222", Subject: "bank code", ReceivedAt: now},
+		{AliasEmail: "c@example.com", Platform: "SHOP", OTPCode: "333333", Subject: "tokoped login", ReceivedAt: now},
+	}
+	for _, row := range seed {
+		if _, err := repo.Create(ctx, row); err != nil {
+			t.Fatalf("Create(seed) error = %v", err)
+		}
+	}
+
+	rows, err := repo.DeleteByFilter(ctx, OTPDeleteFilter{Query: "tokoped"})
+	if err != nil {
+		t.Fatalf("DeleteByFilter(query) error = %v", err)
+	}
+	if rows != 2 {
+		t.Fatalf("expected 2 affected rows, got %d", rows)
+	}
+
+	left, err := repo.List(ctx, OTPListFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(left) != 1 || left[0].Platform != "BANK" {
+		t.Fatalf("expected only BANK row left, got %+v", left)
+	}
+
+	rows, err = repo.DeleteByFilter(ctx, OTPDeleteFilter{AllowDeleteAll: true})
+	if err != nil {
+		t.Fatalf("DeleteByFilter(all) error = %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("expected 1 affected row on clear all, got %d", rows)
+	}
+}
+
+func TestOTPRepository_DeleteByFilter_AllWithoutAllowFlagRejected(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	repo := NewOTPRepository(db)
+	if _, err := repo.DeleteByFilter(context.Background(), OTPDeleteFilter{}); err == nil {
+		t.Fatalf("expected error for clear-all without explicit allow flag")
+	}
+}
+
+func TestOTPRepository_DeleteByID_NotFound(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	repo := NewOTPRepository(db)
+	rows, err := repo.DeleteByID(context.Background(), 99999)
+	if err != nil {
+		t.Fatalf("DeleteByID(not found) error = %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("expected 0 affected rows for unknown id, got %d", rows)
+	}
+}
+
+func TestOTPRepository_DeleteByFilter_AliasAndPlatform(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	repo := NewOTPRepository(db)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	seed := []OTPEvent{
+		{AliasEmail: "same@example.com", Platform: "SHOP", OTPCode: "111111", ReceivedAt: now},
+		{AliasEmail: "same@example.com", Platform: "BANK", OTPCode: "222222", ReceivedAt: now},
+		{AliasEmail: "other@example.com", Platform: "SHOP", OTPCode: "333333", ReceivedAt: now},
+	}
+	for _, row := range seed {
+		if _, err := repo.Create(ctx, row); err != nil {
+			t.Fatalf("Create(seed) error = %v", err)
+		}
+	}
+
+	rows, err := repo.DeleteByFilter(ctx, OTPDeleteFilter{AliasEmail: "same@example.com", Platform: "SHOP"})
+	if err != nil {
+		t.Fatalf("DeleteByFilter(alias+platform) error = %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("expected 1 affected row, got %d", rows)
+	}
+
+	left, err := repo.List(ctx, OTPListFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(left) != 2 {
+		t.Fatalf("expected 2 rows left, got %d", len(left))
+	}
+}
+
+func TestOTPRepository_DeleteByFilter_ScopedQueryAllowed(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	repo := NewOTPRepository(db)
+	if _, err := repo.DeleteByFilter(context.Background(), OTPDeleteFilter{Query: "tokoped"}); err != nil {
+		t.Fatalf("expected delete filter without allow-all to proceed for scoped query, err=%v", err)
+	}
+}
+
+func TestOTPRepository_DeleteByFilter_QueryWildcardEscaped(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	repo := NewOTPRepository(db)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	seed := []OTPEvent{
+		{AliasEmail: "a@example.com", Platform: "SHOP", OTPCode: "111111", Subject: "tokoped code", ReceivedAt: now},
+		{AliasEmail: "b@example.com", Platform: "BANK", OTPCode: "222222", Subject: "bank code", ReceivedAt: now},
+	}
+	for _, row := range seed {
+		if _, err := repo.Create(ctx, row); err != nil {
+			t.Fatalf("Create(seed) error = %v", err)
+		}
+	}
+
+	rows, err := repo.DeleteByFilter(ctx, OTPDeleteFilter{Query: "%"})
+	if err != nil {
+		t.Fatalf("DeleteByFilter(wildcard-literal) error = %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("expected 0 affected rows for escaped wildcard query, got %d", rows)
+	}
+
+	left, err := repo.List(ctx, OTPListFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(left) != 2 {
+		t.Fatalf("expected 2 rows left, got %d", len(left))
+	}
+}
+
+func TestOTPRepository_List_QueryWildcardEscaped(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	repo := NewOTPRepository(db)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	seed := []OTPEvent{
+		{AliasEmail: "a@example.com", Platform: "SHOP", OTPCode: "111111", Subject: "tokoped code", ReceivedAt: now},
+		{AliasEmail: "b@example.com", Platform: "BANK", OTPCode: "222222", Subject: "bank code", ReceivedAt: now},
+	}
+	for _, row := range seed {
+		if _, err := repo.Create(ctx, row); err != nil {
+			t.Fatalf("Create(seed) error = %v", err)
+		}
+	}
+
+	for _, tc := range []string{"%", "_", "\\"} {
+		rows, err := repo.List(ctx, OTPListFilter{Query: tc, Limit: 10})
+		if err != nil {
+			t.Fatalf("List(query=%q) error = %v", tc, err)
+		}
+		if len(rows) != 0 {
+			t.Fatalf("expected 0 rows for escaped wildcard query %q, got %d", tc, len(rows))
+		}
+	}
+}
+
+func TestOTPRepository_DeleteByID_InvalidID(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	repo := NewOTPRepository(db)
+	if _, err := repo.DeleteByID(context.Background(), 0); err == nil {
+		t.Fatalf("expected validation error for id <= 0")
+	}
+}

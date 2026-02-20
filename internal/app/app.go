@@ -157,6 +157,28 @@ func (a *App) ListOTPEvents(ctx context.Context, filter OTPListFilter) ([]domain
 	return rows, nil
 }
 
+func (a *App) ClearOTPEventByID(ctx context.Context, id int64) (int64, error) {
+	if a == nil {
+		return 0, fmt.Errorf("app is nil")
+	}
+	if a.otpRepo == nil {
+		return 0, fmt.Errorf("app otp repository is nil")
+	}
+
+	return a.otpRepo.DeleteByID(ctx, id)
+}
+
+func (a *App) ClearOTPEvents(ctx context.Context, filter OTPDeleteFilter) (int64, error) {
+	if a == nil {
+		return 0, fmt.Errorf("app is nil")
+	}
+	if a.otpRepo == nil {
+		return 0, fmt.Errorf("app otp repository is nil")
+	}
+
+	return a.otpRepo.DeleteByFilter(ctx, ports.OTPDeleteFilter(filter))
+}
+
 func normalizeIncomingEmail(in domain.IncomingEmail) (domain.IncomingEmail, error) {
 	n, err := imap.NormalizeIncomingEmail(imap.IncomingEmail{
 		To:         in.To,

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 
 	"tuiotp/internal/app"
 	"tuiotp/internal/domain"
@@ -21,6 +23,15 @@ type fakeOTPManager struct {
 	lastQuery string
 	lastLimit int
 	calls     int
+
+	clearByIDCalls     int
+	clearByIDLastID    int64
+	clearByIDRows      int64
+	clearByIDErr       error
+	clearByFilterCalls int
+	clearByFilterLast  app.OTPDeleteFilter
+	clearByFilterRows  int64
+	clearByFilterErr   error
 }
 
 type fakeClipboard struct {
@@ -29,10 +40,42 @@ type fakeClipboard struct {
 	calls    int
 }
 
+type fakeSettingsManager struct {
+	loadState SettingsState
+	loadErr   error
+	loadCalls int
+
+	saveState      SettingsState
+	saveClipboard  clipboardCopier
+	saveErr        error
+	saveCalls      int
+	lastSavedState SettingsState
+}
+
 func (f *fakeClipboard) Copy(_ context.Context, text string) error {
 	f.calls++
 	f.lastText = text
 	return f.err
+}
+
+func (f *fakeSettingsManager) Load(_ context.Context) (SettingsState, error) {
+	f.loadCalls++
+	if f.loadErr != nil {
+		return SettingsState{}, f.loadErr
+	}
+	return f.loadState, nil
+}
+
+func (f *fakeSettingsManager) SaveAndApply(_ context.Context, state SettingsState) (SettingsState, clipboardCopier, error) {
+	f.saveCalls++
+	f.lastSavedState = state
+	if f.saveErr != nil {
+		return SettingsState{}, nil, f.saveErr
+	}
+	if f.saveState.ClipboardMethod == "" {
+		f.saveState = state
+	}
+	return f.saveState, f.saveClipboard, nil
 }
 
 func (f *fakeOTPManager) ListOTPEvents(_ context.Context, filter app.OTPListFilter) ([]domain.OTPEvent, error) {
@@ -45,6 +88,24 @@ func (f *fakeOTPManager) ListOTPEvents(_ context.Context, filter app.OTPListFilt
 	out := make([]domain.OTPEvent, len(f.rows))
 	copy(out, f.rows)
 	return out, nil
+}
+
+func (f *fakeOTPManager) ClearOTPEventByID(_ context.Context, id int64) (int64, error) {
+	f.clearByIDCalls++
+	f.clearByIDLastID = id
+	if f.clearByIDErr != nil {
+		return 0, f.clearByIDErr
+	}
+	return f.clearByIDRows, nil
+}
+
+func (f *fakeOTPManager) ClearOTPEvents(_ context.Context, filter app.OTPDeleteFilter) (int64, error) {
+	f.clearByFilterCalls++
+	f.clearByFilterLast = filter
+	if f.clearByFilterErr != nil {
+		return 0, f.clearByFilterErr
+	}
+	return f.clearByFilterRows, nil
 }
 
 func TestNewModel_DefaultState(t *testing.T) {
@@ -123,7 +184,7 @@ func TestModel_Update_GlobalKeymaps(t *testing.T) {
 func TestModel_Update_TabCyclesPanels(t *testing.T) {
 	m := NewModel()
 
-	for i := 0; i < 4; i++ {
+	for i := 0; i < int(panelCount); i++ {
 		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
 		m = updated.(Model)
 	}
@@ -133,10 +194,27 @@ func TestModel_Update_TabCyclesPanels(t *testing.T) {
 	}
 }
 
+func TestModel_SKey_SwitchesToSettingsPanel(t *testing.T) {
+	m := NewModel()
+	m.ActivePanel = PanelStatus
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(Model)
+
+	if m.ActivePanel != PanelSettings {
+		t.Fatalf("expected PanelSettings after s key, got %v", m.ActivePanel)
+	}
+	if cmd != nil {
+		t.Fatalf("expected nil command when no settings manager")
+	}
+}
+
 func TestModel_View_HelpAndPanelHighlight(t *testing.T) {
 	m := NewModel()
 	m.ActivePanel = PanelLatestOTP
 	m.ShowHelp = true
+	m.Width = 120
+	m.Height = 40
 	view := m.View()
 
 	if !contains(view, "Latest OTP") {
@@ -154,14 +232,58 @@ func TestModel_View_NarrowLayoutDoesNotForceWideSplit(t *testing.T) {
 	m := NewModelWithConfig(ModelConfig{})
 	m.Width = 70
 	m.Height = 40
+	m.ActivePanel = PanelLatestOTP
 	m.otpEvents = []domain.OTPEvent{{Platform: "SHOP", OTPCode: "123456", AliasEmail: "a@example.com", ReceivedAt: time.Now().UTC()}}
 
 	v := m.View()
 	if !contains(v, "◈ Selected Detail") {
 		t.Fatalf("expected detail section in narrow layout")
 	}
+	if !contains(v, "⚡ OTP") {
+		t.Fatalf("expected otp tab visible in narrow layout")
+	}
 	if !contains(v, "Latest OTP") {
 		t.Fatalf("expected otp section in narrow layout")
+	}
+	if contains(v, "◈ System Health") || contains(v, "☁  Mail Account  live") {
+		t.Fatalf("expected single-panel layout on small width")
+	}
+}
+
+func TestModel_View_SmallWindow_UsesSingleActiveLogsPanel(t *testing.T) {
+	m := NewModelWithConfig(ModelConfig{})
+	m.Width = 72
+	m.Height = 28
+	m.ActivePanel = PanelLogs
+	m.logLines = []string{"line 1", "line 2"}
+
+	v := m.View()
+	if !contains(v, "≡ Logs") {
+		t.Fatalf("expected logs tab visible in single layout")
+	}
+	if !contains(v, "≡ Logs") {
+		t.Fatalf("expected logs panel in single layout")
+	}
+	if contains(v, "⚡ Latest OTP") || contains(v, "◈ System Health") || contains(v, "☁  Mail Account  live") {
+		t.Fatalf("expected only active panel content in single layout")
+	}
+}
+
+func TestModel_View_SmallWindow_UsesSingleActiveMailPanel(t *testing.T) {
+	m := NewModelWithConfig(ModelConfig{})
+	m.Width = 72
+	m.Height = 28
+	m.ActivePanel = PanelMailAccount
+
+	v := m.View()
+	if !contains(v, "☁ Mail Account") {
+		t.Fatalf("expected mail tab visible in single layout")
+	}
+	if !contains(v, "Mail Account") {
+		t.Fatalf("expected mail account panel in single layout")
+	}
+	if contains(v, "Latest OTP") || contains(v, "System Health") {
+		t.Fatalf("expected single active panel without other sections")
 	}
 }
 
@@ -459,6 +581,206 @@ func TestModel_Update_RuntimeErrorEvent_ReflectsRuntimeFailureInStatus(t *testin
 	}
 }
 
+func TestModel_Update_RuntimeOTPProcessedStored_RefreshesHistory(t *testing.T) {
+	fakeOTP := &fakeOTPManager{rows: []domain.OTPEvent{{ID: 7, Platform: "SHOP", OTPCode: "787878", AliasEmail: "a@example.com", ReceivedAt: time.Now().UTC()}}}
+	m := NewModelWithConfig(ModelConfig{OTPManager: fakeOTP})
+
+	updated, cmd := m.Update(app.RuntimeEvent{Type: app.RuntimeEventOTPProcessed, OTPStatus: app.OTPPipelineStatusStored})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected refresh command for stored otp runtime event")
+	}
+
+	msg := cmd()
+	loaded, ok := msg.(otpHistoryLoadedMsg)
+	if !ok {
+		t.Fatalf("expected otpHistoryLoadedMsg, got %T", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("unexpected load error: %v", loaded.err)
+	}
+	if fakeOTP.calls != 1 {
+		t.Fatalf("expected one otp history fetch, got %d", fakeOTP.calls)
+	}
+}
+
+func TestModel_Update_RuntimeOTPProcessedDuplicate_NoRefresh(t *testing.T) {
+	fakeOTP := &fakeOTPManager{}
+	m := NewModelWithConfig(ModelConfig{OTPManager: fakeOTP})
+
+	_, cmd := m.Update(app.RuntimeEvent{Type: app.RuntimeEventOTPProcessed, OTPStatus: app.OTPPipelineStatusDuplicate})
+	if cmd != nil {
+		t.Fatalf("expected nil command for non-stored otp runtime event")
+	}
+	if fakeOTP.calls != 0 {
+		t.Fatalf("expected no otp history fetch, got %d", fakeOTP.calls)
+	}
+}
+
+func TestModel_OTPPanel_ClearSelectedFlow(t *testing.T) {
+	fakeOTP := &fakeOTPManager{clearByIDRows: 1}
+	m := NewModelWithConfig(ModelConfig{OTPManager: fakeOTP})
+	m.ActivePanel = PanelLatestOTP
+	m.otpEvents = []domain.OTPEvent{{ID: 42, OTPCode: "123456", ReceivedAt: time.Now().UTC()}}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("expected nil command when entering clear confirm")
+	}
+	if !m.otpDeleteMode || m.otpDeleteScope != "selected" {
+		t.Fatalf("expected selected clear confirm mode")
+	}
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected clear selected command on confirm")
+	}
+	msg := runBatchExtract(cmd)
+	deleted, ok := msg.(otpDeletedMsg)
+	if !ok {
+		t.Fatalf("expected otpDeletedMsg, got %T", msg)
+	}
+	if deleted.err != nil {
+		t.Fatalf("unexpected clear error: %v", deleted.err)
+	}
+	if fakeOTP.clearByIDCalls != 1 || fakeOTP.clearByIDLastID != 42 {
+		t.Fatalf("expected clear by id called once with id=42, calls=%d id=%d", fakeOTP.clearByIDCalls, fakeOTP.clearByIDLastID)
+	}
+}
+
+func TestModel_OTPPanel_ClearFilteredRequiresActiveFilter(t *testing.T) {
+	m := NewModelWithConfig(ModelConfig{})
+	m.ActivePanel = PanelLatestOTP
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+	m = updated.(Model)
+	if m.toast == nil || m.toast.Message != "no active filter to clear" {
+		t.Fatalf("expected warning toast for missing filter, got %+v", m.toast)
+	}
+}
+
+func TestModel_OTPPanel_ClearFilteredFlow_UsesCurrentQuery(t *testing.T) {
+	fakeOTP := &fakeOTPManager{clearByFilterRows: 2}
+	m := NewModelWithConfig(ModelConfig{OTPManager: fakeOTP})
+	m.ActivePanel = PanelLatestOTP
+	m.otpSearchQuery = "tokoped"
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("expected nil command when entering filtered clear confirm")
+	}
+	if !m.otpDeleteMode || m.otpDeleteScope != "filtered" {
+		t.Fatalf("expected filtered clear confirm mode")
+	}
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected clear filtered command on confirm")
+	}
+	msg := runBatchExtract(cmd)
+	deleted, ok := msg.(otpDeletedMsg)
+	if !ok {
+		t.Fatalf("expected otpDeletedMsg, got %T", msg)
+	}
+	if deleted.err != nil {
+		t.Fatalf("unexpected clear filtered error: %v", deleted.err)
+	}
+	if fakeOTP.clearByFilterCalls != 1 {
+		t.Fatalf("expected one clear filtered call, got %d", fakeOTP.clearByFilterCalls)
+	}
+	if fakeOTP.clearByFilterLast.Query != "tokoped" {
+		t.Fatalf("expected query tokoped forwarded, got %q", fakeOTP.clearByFilterLast.Query)
+	}
+}
+
+func TestModel_OTPPanel_ClearAllFlow(t *testing.T) {
+	fakeOTP := &fakeOTPManager{clearByFilterRows: 3}
+	m := NewModelWithConfig(ModelConfig{OTPManager: fakeOTP})
+	m.ActivePanel = PanelLatestOTP
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("expected nil command when entering clear all confirm")
+	}
+	if !m.otpDeleteMode || m.otpDeleteScope != "all" {
+		t.Fatalf("expected all clear confirm mode")
+	}
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected clear all command on confirm")
+	}
+	msg := runBatchExtract(cmd)
+	deleted, ok := msg.(otpDeletedMsg)
+	if !ok {
+		t.Fatalf("expected otpDeletedMsg, got %T", msg)
+	}
+	if deleted.err != nil {
+		t.Fatalf("unexpected clear all error: %v", deleted.err)
+	}
+	if fakeOTP.clearByFilterCalls != 1 {
+		t.Fatalf("expected one clear-all call, got %d", fakeOTP.clearByFilterCalls)
+	}
+	if fakeOTP.clearByFilterLast.Query != "" {
+		t.Fatalf("expected empty query for clear-all, got %q", fakeOTP.clearByFilterLast.Query)
+	}
+	if !fakeOTP.clearByFilterLast.AllowDeleteAll {
+		t.Fatalf("expected allow-delete-all flag for clear-all flow")
+	}
+}
+
+func TestModel_OTPPanel_ClearCancel(t *testing.T) {
+	fakeOTP := &fakeOTPManager{}
+	m := NewModelWithConfig(ModelConfig{OTPManager: fakeOTP})
+	m.ActivePanel = PanelLatestOTP
+	m.otpEvents = []domain.OTPEvent{{ID: 99, OTPCode: "123123", ReceivedAt: time.Now().UTC()}}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = updated.(Model)
+	if !m.otpDeleteMode {
+		t.Fatalf("expected delete confirm mode")
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected toast command on cancel")
+	}
+	if m.otpDeleteMode {
+		t.Fatalf("expected delete confirm mode cleared after cancel")
+	}
+	if m.toast == nil || m.toast.Message != "clear cancelled" {
+		t.Fatalf("expected toast 'clear cancelled', got %+v", m.toast)
+	}
+}
+
+func TestModel_OTPPanel_ClearSelectedError_ShowsErrorToast(t *testing.T) {
+	fakeOTP := &fakeOTPManager{clearByIDErr: errors.New("delete failed")}
+	m := NewModelWithConfig(ModelConfig{OTPManager: fakeOTP})
+	m.ActivePanel = PanelLatestOTP
+	m.otpEvents = []domain.OTPEvent{{ID: 12, OTPCode: "121212", ReceivedAt: time.Now().UTC()}}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = updated.(Model)
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected clear command")
+	}
+	msg := runBatchExtract(cmd)
+	updated, _ = m.Update(msg)
+	m = updated.(Model)
+	if m.toast == nil || !contains(m.toast.Message, "clear otp failed") {
+		t.Fatalf("expected clear otp failed toast, got %+v", m.toast)
+	}
+}
+
 func TestModel_View_FitsWithinTerminalHeight(t *testing.T) {
 	sizes := []struct{ w, h int }{
 		{120, 40},
@@ -522,6 +844,24 @@ func TestTrimLastRune_UnicodeSafe(t *testing.T) {
 	}
 	if got := trimLastRune(""); got != "" {
 		t.Fatalf("expected empty string for empty input, got %q", got)
+	}
+}
+
+func TestTruncate_ANSISafeAndWidthAware(t *testing.T) {
+	in := "\x1b[31mHELLOWORLD\x1b[0m"
+	got := truncate(in, 5)
+
+	if w := lipgloss.Width(got); w > 5 {
+		t.Fatalf("expected width <= 5, got %d (%q)", w, got)
+	}
+
+	plain := xansi.Strip(got)
+	if plain != "HELL…" {
+		t.Fatalf("expected stripped output HELL…, got %q", plain)
+	}
+
+	if strings.Contains(got, "\x1b[") && !strings.Contains(got, "\x1b[0m") {
+		t.Fatalf("expected ANSI reset to remain intact, got %q", got)
 	}
 }
 
@@ -1560,6 +1900,48 @@ func TestModel_View_FitsWithinTerminalHeight_WithLogLines(t *testing.T) {
 	}
 }
 
+func TestModel_View_NarrowWidth_UsesStackedResponsiveLayout(t *testing.T) {
+	m := NewModelWithConfig(ModelConfig{})
+	m.Width = 90
+	m.Height = 24
+	m.otpEvents = []domain.OTPEvent{{Platform: "SHOP", OTPCode: "123456", AliasEmail: "a@example.com", ReceivedAt: time.Now().UTC()}}
+	m.cfRules = []ports.RoutingRule{{ID: "r1", AliasEmail: "a@example.com", Enabled: true}}
+
+	v := m.View()
+	if !contains(v, "Latest OTP") {
+		t.Fatalf("expected latest otp card in narrow layout")
+	}
+	if !contains(v, "System Health") {
+		t.Fatalf("expected health card in narrow layout")
+	}
+	if !contains(v, "Mail Account") {
+		t.Fatalf("expected mail account card in narrow layout")
+	}
+	renderedH := strings.Count(v, "\n") + 1
+	if renderedH > m.Height {
+		t.Fatalf("expected rendered height <= terminal height, got %d > %d", renderedH, m.Height)
+	}
+}
+
+func TestModel_View_TinyTerminal_FallsBackMinimalView(t *testing.T) {
+	m := NewModelWithConfig(ModelConfig{})
+	m.Width = 30
+	m.Height = 8
+	m.otpEvents = []domain.OTPEvent{{Platform: "SHOP", OTPCode: "123456", AliasEmail: "a@example.com", ReceivedAt: time.Now().UTC()}}
+
+	v := m.View()
+	if !contains(v, "Resize terminal") {
+		t.Fatalf("expected minimal fallback hint in tiny terminal")
+	}
+	if !contains(v, "OTP events:") {
+		t.Fatalf("expected minimal otp summary")
+	}
+	renderedH := strings.Count(v, "\n") + 1
+	if renderedH > m.Height {
+		t.Fatalf("expected rendered height <= terminal height, got %d > %d", renderedH, m.Height)
+	}
+}
+
 func TestModel_LogTickMsg_AutoScrollResetsScrollToZero(t *testing.T) {
 	buf := &fakeLogBuffer{
 		lines: []string{"line1", "line2", "line3"},
@@ -1607,6 +1989,241 @@ func TestModel_NewModelWithConfig_LogAutoScrollDefault(t *testing.T) {
 	m := NewModel()
 	if !m.logAutoScroll {
 		t.Fatalf("expected logAutoScroll=true by default")
+	}
+}
+
+func TestModel_Init_LoadsSettingsWhenManagerConfigured(t *testing.T) {
+	fakeSettings := &fakeSettingsManager{loadState: SettingsState{ClipboardEnabled: true, ClipboardMethod: "auto"}}
+	m := NewModelWithConfig(ModelConfig{SettingsMgr: fakeSettings})
+
+	cmd := m.Init()
+	if cmd == nil {
+		t.Fatalf("expected init command with settings manager")
+	}
+	msg := cmd()
+	loaded, ok := msg.(settingsLoadedMsg)
+	if !ok {
+		t.Fatalf("expected settingsLoadedMsg, got %T", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("unexpected settings load error: %v", loaded.err)
+	}
+
+	updated, _ := m.Update(loaded)
+	m = updated.(Model)
+	if !m.settingsLoaded {
+		t.Fatalf("expected settingsLoaded=true")
+	}
+	if m.settingsForm.ClipboardMethod != "auto" {
+		t.Fatalf("expected clipboard method auto, got %q", m.settingsForm.ClipboardMethod)
+	}
+	if fakeSettings.loadCalls != 1 {
+		t.Fatalf("expected one settings load call, got %d", fakeSettings.loadCalls)
+	}
+}
+
+func TestModel_SettingsPanel_ToggleAndSaveApply(t *testing.T) {
+	clip := &fakeClipboard{}
+	fakeSettings := &fakeSettingsManager{
+		saveState:     SettingsState{ClipboardEnabled: false, ClipboardMethod: "xclip", Timezone: "Asia/Jakarta"},
+		saveClipboard: clip,
+	}
+	m := NewModelWithConfig(ModelConfig{SettingsMgr: fakeSettings})
+	m.ActivePanel = PanelSettings
+	m.settingsLoaded = true
+	m.settingsForm = SettingsState{ClipboardEnabled: true, ClipboardMethod: "auto", Timezone: "UTC"}
+	m.settingsOriginal = m.settingsForm
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m = updated.(Model)
+	if m.settingsForm.ClipboardEnabled {
+		t.Fatalf("expected clipboard enabled toggled to false")
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected save command")
+	}
+	if !m.settingsSaving {
+		t.Fatalf("expected settingsSaving=true while saving")
+	}
+
+	msg := runBatchExtract(cmd)
+	saved, ok := msg.(settingsSavedMsg)
+	if !ok {
+		t.Fatalf("expected settingsSavedMsg, got %T", msg)
+	}
+	if fakeSettings.saveCalls != 1 {
+		t.Fatalf("expected one save call, got %d", fakeSettings.saveCalls)
+	}
+	if fakeSettings.lastSavedState.ClipboardEnabled {
+		t.Fatalf("expected saved state clipboard enabled=false")
+	}
+
+	updated, _ = m.Update(saved)
+	m = updated.(Model)
+	if m.settingsSaving {
+		t.Fatalf("expected settingsSaving=false after save result")
+	}
+	if m.settingsForm.ClipboardMethod != "xclip" {
+		t.Fatalf("expected method xclip after apply, got %q", m.settingsForm.ClipboardMethod)
+	}
+	if m.settingsForm.Timezone != "Asia/Jakarta" {
+		t.Fatalf("expected timezone Asia/Jakarta after apply, got %q", m.settingsForm.Timezone)
+	}
+	if m.clipboard != clip {
+		t.Fatalf("expected clipboard adapter updated from settings apply")
+	}
+}
+
+func TestModel_SettingsPanel_EditMethodThenSave(t *testing.T) {
+	fakeSettings := &fakeSettingsManager{}
+	m := NewModelWithConfig(ModelConfig{SettingsMgr: fakeSettings})
+	m.ActivePanel = PanelSettings
+	m.settingsLoaded = true
+	m.settingsForm = SettingsState{ClipboardEnabled: true, ClipboardMethod: "auto"}
+	m.settingsOriginal = m.settingsForm
+	m.settingsSelected = 1
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m = updated.(Model)
+	if !m.settingsEditing {
+		t.Fatalf("expected editing mode for method")
+	}
+
+	for i := 0; i < 4; i++ {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		m = updated.(Model)
+	}
+	for _, r := range []rune("xsel") {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(Model)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if m.settingsEditing {
+		t.Fatalf("expected editing mode closed by enter")
+	}
+	if m.settingsForm.ClipboardMethod != "xsel" {
+		t.Fatalf("expected method xsel after editing, got %q", m.settingsForm.ClipboardMethod)
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	msg := runBatchExtract(cmd)
+	if _, ok := msg.(settingsSavedMsg); !ok {
+		t.Fatalf("expected settingsSavedMsg, got %T", msg)
+	}
+	if fakeSettings.lastSavedState.ClipboardMethod != "xsel" {
+		t.Fatalf("expected save state method xsel, got %q", fakeSettings.lastSavedState.ClipboardMethod)
+	}
+}
+
+func TestModel_SettingsPanel_ResetRestoresOriginal(t *testing.T) {
+	m := NewModelWithConfig(ModelConfig{SettingsMgr: &fakeSettingsManager{}})
+	m.ActivePanel = PanelSettings
+	m.settingsLoaded = true
+	m.settingsOriginal = SettingsState{ClipboardEnabled: true, ClipboardMethod: "auto", Timezone: "UTC"}
+	m.settingsForm = SettingsState{ClipboardEnabled: false, ClipboardMethod: "xclip", Timezone: "Asia/Jakarta"}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m = updated.(Model)
+	if !m.settingsForm.ClipboardEnabled || m.settingsForm.ClipboardMethod != "auto" || m.settingsForm.Timezone != "UTC" {
+		t.Fatalf("expected reset to original settings, got %+v", m.settingsForm)
+	}
+	if m.toast == nil || m.toast.Message != "settings reset" {
+		t.Fatalf("expected settings reset toast, got %+v", m.toast)
+	}
+}
+
+func TestModel_SettingsPanel_EditTimezoneThenSave(t *testing.T) {
+	fakeSettings := &fakeSettingsManager{}
+	m := NewModelWithConfig(ModelConfig{SettingsMgr: fakeSettings})
+	m.ActivePanel = PanelSettings
+	m.settingsLoaded = true
+	m.settingsForm = SettingsState{ClipboardEnabled: true, ClipboardMethod: "auto", Timezone: "UTC", LogPath: "", IMAPPollInterval: "5s"}
+	m.settingsOriginal = m.settingsForm
+	m.settingsSelected = 2
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m = updated.(Model)
+	if !m.settingsEditing {
+		t.Fatalf("expected timezone editing mode")
+	}
+
+	for i := 0; i < 3; i++ {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		m = updated.(Model)
+	}
+	for _, r := range []rune("Asia/Jakarta") {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(Model)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if m.settingsEditing {
+		t.Fatalf("expected editing closed after enter")
+	}
+	if m.settingsForm.Timezone != "Asia/Jakarta" {
+		t.Fatalf("expected timezone updated, got %q", m.settingsForm.Timezone)
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	msg := runBatchExtract(cmd)
+	if _, ok := msg.(settingsSavedMsg); !ok {
+		t.Fatalf("expected settingsSavedMsg, got %T", msg)
+	}
+	if fakeSettings.lastSavedState.Timezone != "Asia/Jakarta" {
+		t.Fatalf("expected saved timezone Asia/Jakarta, got %q", fakeSettings.lastSavedState.Timezone)
+	}
+}
+
+func TestModel_SettingsPanel_EditLogPathAndPollIntervalThenSave(t *testing.T) {
+	fakeSettings := &fakeSettingsManager{}
+	m := NewModelWithConfig(ModelConfig{SettingsMgr: fakeSettings})
+	m.ActivePanel = PanelSettings
+	m.settingsLoaded = true
+	m.settingsForm = SettingsState{ClipboardEnabled: true, ClipboardMethod: "auto", Timezone: "UTC", LogPath: "", IMAPPollInterval: "5s"}
+	m.settingsOriginal = m.settingsForm
+
+	// Edit log_path (row 3)
+	m.settingsSelected = 3
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m = updated.(Model)
+	for _, r := range []rune("/tmp/tuiotp.log") {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(Model)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+
+	// Edit poll interval (row 4)
+	m.settingsSelected = 4
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = updated.(Model)
+	for _, r := range []rune("10s") {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(Model)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	msg := runBatchExtract(cmd)
+	if _, ok := msg.(settingsSavedMsg); !ok {
+		t.Fatalf("expected settingsSavedMsg, got %T", msg)
+	}
+	if fakeSettings.lastSavedState.LogPath != "/tmp/tuiotp.log" {
+		t.Fatalf("expected saved log path, got %q", fakeSettings.lastSavedState.LogPath)
+	}
+	if fakeSettings.lastSavedState.IMAPPollInterval != "10s" {
+		t.Fatalf("expected saved poll interval 10s, got %q", fakeSettings.lastSavedState.IMAPPollInterval)
 	}
 }
 

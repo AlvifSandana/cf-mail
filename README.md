@@ -54,19 +54,40 @@ TUIOTP adalah tool **Go TUI** untuk:
 - Cloudflare API Token dengan permission yang cukup untuk Email Routing.
 - IMAP credentials untuk destination inbox (disarankan app password jika Gmail).
 
-### 2) Setup environment variables
-```bash
-export CF_API_TOKEN="..."
-export IMAP_APP_PASSWORD="..."
-```
-
-### 3) Config
+### 2) Config
 Buat `config.yml` berdasarkan contoh di bawah.
 
-### 4) Run
+**Rekomendasi aman (default):** pakai `*_env` dan set secret via environment.
+
+**Opsional (lebih praktis, risiko lebih tinggi):** isi langsung `cloudflare.api_token`
+dan `mailbox.imap.password` di `config.yml` lokal (jangan pernah di-commit).
+
+### 3) Run
 ```bash
 go run ./cmd/tuiotp --config ./config.yml
 ```
+
+### 4) Migration helper (opsional)
+Kalau kamu punya config lama yang masih env-only, gunakan helper ini:
+
+```bash
+# mode hybrid: isi inline secret, tapi *_env tetap dipertahankan
+./scripts/migrate-config.sh ./config.yml hybrid
+
+# mode inline: isi inline secret dan kosongkan *_env
+./scripts/migrate-config.sh ./config.yml inline
+```
+
+Output default: `config.migrated.yml` (permission `600`).
+Kamu juga bisa jalankan binary langsung:
+
+```bash
+go run ./cmd/config-migrator --config ./config.yml --mode hybrid
+go run ./cmd/config-migrator --config ./config.yml --mode inline --in-place
+```
+
+> Catatan keamanan: migrator menulis secret ke file YAML.
+> Pastikan file output tetap lokal, tidak di-commit, dan permission `600`.
 
 ---
 
@@ -79,7 +100,8 @@ app:
   log_path: "./tuiotp.log"
 
 cloudflare:
-  api_token_env: "CF_API_TOKEN"
+  api_token: "" # optional inline secret
+  api_token_env: "CF_API_TOKEN" # recommended
   account_id: "xxxx"
   zone_id: "yyyy"
   domain: "example.com"
@@ -98,7 +120,8 @@ mailbox:
     port: 993
     tls: true
     username: "apin.inbox@gmail.com"
-    password_env: "IMAP_APP_PASSWORD"
+    password: "" # optional inline secret
+    password_env: "IMAP_APP_PASSWORD" # recommended
     mailbox: "INBOX"
     idle: true
     poll_interval: "5s"
@@ -130,13 +153,16 @@ ui:
 
 ---
 
-## TUI Keybindings (proposal)
+## TUI Keybindings
 
 Global:
 - `q` quit
 - `?` toggle help
-- `r` refresh cloudflare list
-- `tab` switch panel (optional)
+- `r` refresh data
+- `tab` switch panel
+- `s` jump to Settings panel
+- `o` jump to OTP panel
+- `l` jump to Logs panel
 
 Dashboard:
 - `n` new alias
@@ -147,6 +173,19 @@ Dashboard:
 Detail/History:
 - `c` copy OTP
 - `b` / `esc` back
+
+Settings:
+- `↑↓` pilih field
+- `space` / `e` toggle/edit field
+- `enter` save + apply settings
+- `r` reset ke nilai terakhir yang sudah di-load
+
+Field yang bisa diedit saat ini:
+- `ui.clipboard.enabled`
+- `ui.clipboard.method`
+- `app.timezone`
+- `app.log_path`
+- `mailbox.imap.poll_interval`
 
 ---
 
@@ -208,8 +247,9 @@ Docs:
 ---
 
 ## Security
-- Jangan hardcode token/password di file repo.
-- Prefer env vars (`CF_API_TOKEN`, `IMAP_APP_PASSWORD`).
+- Jangan commit token/password ke Git.
+- Jika simpan secret di `config.yml`, pastikan file lokal saja dan permission ketat (mis. `chmod 600 config.yml`).
+- `api_token_env` dan `password_env` tetap bisa dipakai jika ingin secret di environment.
 - Log harus redacted (no secrets).
 
 ---

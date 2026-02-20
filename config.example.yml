@@ -4,8 +4,10 @@ app:
   log_path: "./tuiotp.log"
 
 cloudflare:
-  # Nama environment variable yang menyimpan Cloudflare API Token.
-  api_token_env: "CF_API_TOKEN"
+  # Isi langsung token API (opsional jika pakai api_token_env).
+  api_token: ""
+  # Nama environment variable token (opsional jika api_token diisi).
+  api_token_env: ""
   account_id: "your_account_id"
   zone_id: "your_zone_id"
   domain: "example.com"
@@ -24,8 +26,10 @@ mailbox:
     port: 993
     tls: true
     username: "destination-inbox@gmail.com"
-    # Nama environment variable yang menyimpan IMAP app password.
-    password_env: "IMAP_APP_PASSWORD"
+    # Isi langsung app password (opsional jika pakai password_env).
+    password: ""
+    # Nama environment variable password (opsional jika password diisi).
+    password_env: ""
     mailbox: "INBOX"
     idle: true
     poll_interval: "5s"

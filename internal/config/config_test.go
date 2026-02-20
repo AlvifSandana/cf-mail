@@ -55,6 +55,75 @@ mailbox:
 	}
 }
 
+func TestLoad_UsesInlineSecretsWithoutEnv(t *testing.T) {
+	path := writeTempConfig(t, `
+app:
+  timezone: "Asia/Jakarta"
+cloudflare:
+  api_token: "token-inline"
+  zone_id: "zone"
+  domain: "example.com"
+destination:
+  email: "dest@example.com"
+mailbox:
+  mode: "imap"
+  imap:
+    host: "imap.gmail.com"
+    port: 993
+    tls: true
+    username: "user@example.com"
+    password: "pass-inline"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Cloudflare.APIToken != "token-inline" {
+		t.Fatalf("expected API token from config file")
+	}
+	if cfg.Mailbox.IMAP.Password != "pass-inline" {
+		t.Fatalf("expected IMAP password from config file")
+	}
+}
+
+func TestLoad_InlineSecretsOverrideEnvFallback(t *testing.T) {
+	t.Setenv("CF_API_TOKEN", "token-from-env")
+	t.Setenv("IMAP_APP_PASSWORD", "pass-from-env")
+
+	path := writeTempConfig(t, `
+cloudflare:
+  api_token: "token-inline"
+  api_token_env: "CF_API_TOKEN"
+  zone_id: "zone"
+  domain: "example.com"
+destination:
+  email: "dest@example.com"
+mailbox:
+  mode: "imap"
+  imap:
+    host: "imap.gmail.com"
+    port: 993
+    tls: true
+    username: "user@example.com"
+    password: "pass-inline"
+    password_env: "IMAP_APP_PASSWORD"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.Cloudflare.APIToken != "token-inline" {
+		t.Fatalf("expected inline API token to override env fallback")
+	}
+	if cfg.Mailbox.IMAP.Password != "pass-inline" {
+		t.Fatalf("expected inline IMAP password to override env fallback")
+	}
+}
+
 func TestLoad_UnknownFieldFails(t *testing.T) {
 	path := writeTempConfig(t, `
 app:
@@ -115,6 +184,20 @@ func TestValidate_RejectsInsecureOrInvalidValues(t *testing.T) {
 		mutate func(*Config)
 	}{
 		{
+			name: "missing cloudflare token and env",
+			mutate: func(c *Config) {
+				c.Cloudflare.APIToken = ""
+				c.Cloudflare.APITokenEnv = ""
+			},
+		},
+		{
+			name: "missing imap password and env",
+			mutate: func(c *Config) {
+				c.Mailbox.IMAP.Password = ""
+				c.Mailbox.IMAP.PasswordEnv = ""
+			},
+		},
+		{
 			name: "unsupported mailbox mode",
 			mutate: func(c *Config) {
 				c.Mailbox.Mode = "gmail-api"
@@ -156,6 +239,24 @@ func TestValidate_RejectsInsecureOrInvalidValues(t *testing.T) {
 			name: "invalid otp regex",
 			mutate: func(c *Config) {
 				c.OTP.Rules[0].OTPRegex = "("
+			},
+		},
+		{
+			name: "unsupported clipboard method",
+			mutate: func(c *Config) {
+				c.UI.Clipboard.Method = "evil-copy"
+			},
+		},
+		{
+			name: "invalid timezone",
+			mutate: func(c *Config) {
+				c.App.Timezone = "Mars/Phobos"
+			},
+		},
+		{
+			name: "invalid imap poll interval",
+			mutate: func(c *Config) {
+				c.Mailbox.IMAP.PollInterval = "abc"
 			},
 		},
 	}

@@ -216,6 +216,27 @@ func (a otpRepositoryAdapter) List(ctx context.Context, filter ports.OTPListFilt
 	return out, nil
 }
 
+func (a otpRepositoryAdapter) DeleteByID(ctx context.Context, id int64) (int64, error) {
+	if a.repo == nil {
+		return 0, domain.WrapValidation("otp repository adapter repo is nil", nil)
+	}
+
+	return a.repo.DeleteByID(ctx, id)
+}
+
+func (a otpRepositoryAdapter) DeleteByFilter(ctx context.Context, filter ports.OTPDeleteFilter) (int64, error) {
+	if a.repo == nil {
+		return 0, domain.WrapValidation("otp repository adapter repo is nil", nil)
+	}
+
+	return a.repo.DeleteByFilter(ctx, sqlite.OTPDeleteFilter{
+		AliasEmail:     filter.AliasEmail,
+		Platform:       filter.Platform,
+		Query:          filter.Query,
+		AllowDeleteAll: filter.AllowDeleteAll,
+	})
+}
+
 type otpDuplicateRepositoryAdapter struct {
 	repo *sqlite.OTPRepository
 }

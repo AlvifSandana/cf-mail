@@ -1,0 +1,6 @@
+.env
+*.db
+*.log
+config.yml
+config*.yml
+!config.example.yml

@@ -68,6 +68,8 @@ type OTPRenderer interface {
 type OTPRepository interface {
 	Create(ctx context.Context, in domain.OTPEvent) (domain.OTPEvent, error)
 	List(ctx context.Context, filter OTPListFilter) ([]domain.OTPEvent, error)
+	DeleteByID(ctx context.Context, id int64) (int64, error)
+	DeleteByFilter(ctx context.Context, filter OTPDeleteFilter) (int64, error)
 }
 
 // OTPDuplicateRepository defines dedupe lookup contract.
@@ -80,6 +82,13 @@ type OTPListFilter struct {
 	Platform   string
 	Query      string
 	Limit      int
+}
+
+type OTPDeleteFilter struct {
+	AliasEmail     string
+	Platform       string
+	Query          string
+	AllowDeleteAll bool
 }
 
 type OTPDuplicateCheck struct {

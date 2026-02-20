@@ -17,14 +17,13 @@ type AppConfig struct {
 
 type CloudflareConfig struct {
 	APITokenEnv      string `yaml:"api_token_env"`
+	APIToken         string `yaml:"api_token"`
 	AccountID        string `yaml:"account_id"`
 	ZoneID           string `yaml:"zone_id"`
 	Domain           string `yaml:"domain"`
 	RuleNamePrefix   string `yaml:"rule_name_prefix"`
 	DefaultPriority  int    `yaml:"default_priority"`
 	EnabledByDefault bool   `yaml:"enabled_by_default"`
-
-	APIToken string `yaml:"-"`
 }
 
 type DestinationConfig struct {
@@ -43,12 +42,11 @@ type IMAPConfig struct {
 	TLS          bool   `yaml:"tls"`
 	Username     string `yaml:"username"`
 	PasswordEnv  string `yaml:"password_env"`
+	Password     string `yaml:"password"`
 	Mailbox      string `yaml:"mailbox"`
 	Idle         bool   `yaml:"idle"`
 	PollInterval string `yaml:"poll_interval"`
 	FetchBody    string `yaml:"fetch_body"`
-
-	Password string `yaml:"-"`
 }
 
 type OTPConfig struct {

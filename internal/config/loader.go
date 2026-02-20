@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -26,13 +27,17 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse yaml: %w", err)
 	}
 
-	if cfg.Cloudflare.APITokenEnv != "" {
+	cfg.Cloudflare.APIToken = strings.TrimSpace(cfg.Cloudflare.APIToken)
+	cfg.Cloudflare.APITokenEnv = strings.TrimSpace(cfg.Cloudflare.APITokenEnv)
+	if cfg.Cloudflare.APIToken == "" && cfg.Cloudflare.APITokenEnv != "" {
 		if token, ok := os.LookupEnv(cfg.Cloudflare.APITokenEnv); ok {
 			cfg.Cloudflare.APIToken = token
 		}
 	}
 
-	if cfg.Mailbox.IMAP.PasswordEnv != "" {
+	cfg.Mailbox.IMAP.Password = strings.TrimSpace(cfg.Mailbox.IMAP.Password)
+	cfg.Mailbox.IMAP.PasswordEnv = strings.TrimSpace(cfg.Mailbox.IMAP.PasswordEnv)
+	if cfg.Mailbox.IMAP.Password == "" && cfg.Mailbox.IMAP.PasswordEnv != "" {
 		if password, ok := os.LookupEnv(cfg.Mailbox.IMAP.PasswordEnv); ok {
 			cfg.Mailbox.IMAP.Password = password
 		}
