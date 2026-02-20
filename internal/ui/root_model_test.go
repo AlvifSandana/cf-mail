@@ -923,6 +923,8 @@ type fakeRulesManager struct {
 	listResult   []ports.RoutingRule
 	listErr      error
 	listCalls    int
+	domains      []string
+	activeDomain string
 	createResult ports.RoutingRule
 	createErr    error
 	createCalls  int
@@ -934,6 +936,24 @@ type fakeRulesManager struct {
 	deleteErr    error
 	deleteCalls  int
 	lastDeleteID string
+}
+
+func (f *fakeRulesManager) ListDomains() []string {
+	out := make([]string, len(f.domains))
+	copy(out, f.domains)
+	return out
+}
+
+func (f *fakeRulesManager) ActiveDomain() string {
+	return f.activeDomain
+}
+
+func (f *fakeRulesManager) SetActiveDomain(domain string) error {
+	if strings.TrimSpace(domain) == "" {
+		return errors.New("active domain is required")
+	}
+	f.activeDomain = strings.ToLower(strings.TrimSpace(domain))
+	return nil
 }
 
 func (f *fakeRulesManager) ListRoutingRules(_ context.Context) ([]ports.RoutingRule, error) {
@@ -1032,6 +1052,8 @@ func TestModel_MailAccountLoaded_Error(t *testing.T) {
 
 func TestModel_MailAccount_CreateFlow_SubmitAndRefresh(t *testing.T) {
 	fakeRules := &fakeRulesManager{
+		domains:      []string{"example.com"},
+		activeDomain: "example.com",
 		createResult: ports.RoutingRule{ID: "r-new", Name: "tuiotp:shop", Enabled: true, AliasEmail: "shop@example.com"},
 	}
 	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
@@ -1090,6 +1112,52 @@ func TestModel_MailAccount_CreateFlow_SubmitAndRefresh(t *testing.T) {
 	}
 	if m.toast == nil || m.toast.Message != "mail account created" {
 		t.Fatalf("expected toast 'mail account created', got %+v", m.toast)
+	}
+}
+
+func TestModel_MailAccount_CreateFlow_LocalPartUsesActiveDomain(t *testing.T) {
+	fakeRules := &fakeRulesManager{
+		domains:      []string{"example.com", "example.net"},
+		activeDomain: "example.net",
+		createResult: ports.RoutingRule{ID: "r-new", AliasEmail: "shop@example.net", Enabled: true},
+	}
+	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
+	m.ActivePanel = PanelMailAccount
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = updated.(Model)
+	for _, r := range []rune("shop") {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(Model)
+	}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("expected create command")
+	}
+	_ = runBatchExtract(cmd)
+	if fakeRules.lastCreate.AliasEmail != "shop@example.net" {
+		t.Fatalf("expected local-part expanded with active domain, got %q", fakeRules.lastCreate.AliasEmail)
+	}
+}
+
+func TestModel_MailAccount_DomainSwitchControls(t *testing.T) {
+	fakeRules := &fakeRulesManager{domains: []string{"example.com", "example.net"}, activeDomain: "example.com"}
+	m := NewModelWithConfig(ModelConfig{RulesManager: fakeRules})
+	m.ActivePanel = PanelMailAccount
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	m = updated.(Model)
+	if fakeRules.activeDomain != "example.net" {
+		t.Fatalf("expected ] to switch to next domain, got %q", fakeRules.activeDomain)
+	}
+	if cmd == nil {
+		t.Fatalf("expected refresh command after switching domain")
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}})
+	m = updated.(Model)
+	if fakeRules.activeDomain != "example.com" {
+		t.Fatalf("expected [ to switch to previous domain, got %q", fakeRules.activeDomain)
 	}
 }
 
@@ -2077,6 +2145,53 @@ func TestModel_SettingsPanel_ToggleAndSaveApply(t *testing.T) {
 	}
 }
 
+func TestModel_SettingsPanel_EditDomainsAndActiveDomainThenSave(t *testing.T) {
+	fakeSettings := &fakeSettingsManager{}
+	m := NewModelWithConfig(ModelConfig{SettingsMgr: fakeSettings})
+	m.ActivePanel = PanelSettings
+	m.settingsLoaded = true
+	m.settingsForm = SettingsState{ClipboardEnabled: true, ClipboardMethod: "auto", DomainsText: "example.com,z1", ActiveDomain: "example.com"}
+	m.settingsOriginal = m.settingsForm
+
+	// edit domains (row 2)
+	m.settingsSelected = 2
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m = updated.(Model)
+	for _, r := range []rune("\nexample.net,z2") {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(Model)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+
+	// edit active_domain (row 3)
+	m.settingsSelected = 3
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	m = updated.(Model)
+	for i := 0; i < len("example.com"); i++ {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+		m = updated.(Model)
+	}
+	for _, r := range []rune("example.net") {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(Model)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	msg := runBatchExtract(cmd)
+	if _, ok := msg.(settingsSavedMsg); !ok {
+		t.Fatalf("expected settingsSavedMsg, got %T", msg)
+	}
+	if !strings.Contains(fakeSettings.lastSavedState.DomainsText, "example.net,z2") {
+		t.Fatalf("expected domains text saved, got %q", fakeSettings.lastSavedState.DomainsText)
+	}
+	if fakeSettings.lastSavedState.ActiveDomain != "example.net" {
+		t.Fatalf("expected active domain saved, got %q", fakeSettings.lastSavedState.ActiveDomain)
+	}
+}
+
 func TestModel_SettingsPanel_EditMethodThenSave(t *testing.T) {
 	fakeSettings := &fakeSettingsManager{}
 	m := NewModelWithConfig(ModelConfig{SettingsMgr: fakeSettings})
@@ -2144,7 +2259,7 @@ func TestModel_SettingsPanel_EditTimezoneThenSave(t *testing.T) {
 	m.settingsLoaded = true
 	m.settingsForm = SettingsState{ClipboardEnabled: true, ClipboardMethod: "auto", Timezone: "UTC", LogPath: "", IMAPPollInterval: "5s"}
 	m.settingsOriginal = m.settingsForm
-	m.settingsSelected = 2
+	m.settingsSelected = 4
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
 	m = updated.(Model)
@@ -2188,8 +2303,8 @@ func TestModel_SettingsPanel_EditLogPathAndPollIntervalThenSave(t *testing.T) {
 	m.settingsForm = SettingsState{ClipboardEnabled: true, ClipboardMethod: "auto", Timezone: "UTC", LogPath: "", IMAPPollInterval: "5s"}
 	m.settingsOriginal = m.settingsForm
 
-	// Edit log_path (row 3)
-	m.settingsSelected = 3
+	// Edit log_path (row 5)
+	m.settingsSelected = 5
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
 	m = updated.(Model)
 	for _, r := range []rune("/tmp/tuiotp.log") {
@@ -2199,8 +2314,8 @@ func TestModel_SettingsPanel_EditLogPathAndPollIntervalThenSave(t *testing.T) {
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(Model)
 
-	// Edit poll interval (row 4)
-	m.settingsSelected = 4
+	// Edit poll interval (row 6)
+	m.settingsSelected = 6
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
 	m = updated.(Model)
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})

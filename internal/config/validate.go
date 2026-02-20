@@ -21,14 +21,51 @@ func Validate(cfg *Config) error {
 		}
 		return fmt.Errorf("cloudflare api token is empty or not set")
 	}
-	if strings.TrimSpace(cfg.Cloudflare.ZoneID) == "" {
-		return fmt.Errorf("cloudflare.zone_id is required")
-	}
 	if cfg.Destination.RequireVerified && strings.TrimSpace(cfg.Cloudflare.AccountID) == "" {
 		return fmt.Errorf("cloudflare.account_id is required when destination.require_verified=true")
 	}
-	if strings.TrimSpace(cfg.Cloudflare.Domain) == "" {
-		return fmt.Errorf("cloudflare.domain is required")
+
+	if len(cfg.Cloudflare.Domains) > 0 {
+		seenConfigured := make(map[string]struct{}, len(cfg.Cloudflare.Domains))
+		for i, d := range cfg.Cloudflare.Domains {
+			if strings.TrimSpace(d.ZoneID) == "" {
+				return fmt.Errorf("cloudflare.domains[%d].zone_id is required", i)
+			}
+			domainName := strings.ToLower(strings.TrimSpace(d.Domain))
+			if domainName == "" {
+				return fmt.Errorf("cloudflare.domains[%d].domain is required", i)
+			}
+			if _, exists := seenConfigured[domainName]; exists {
+				return fmt.Errorf("duplicate cloudflare domain: %q", domainName)
+			}
+			seenConfigured[domainName] = struct{}{}
+		}
+	}
+
+	effectiveDomains := cfg.Cloudflare.EffectiveDomains()
+	if len(effectiveDomains) == 0 {
+		return fmt.Errorf("at least one cloudflare domain is required")
+	}
+	seenDomains := make(map[string]struct{}, len(effectiveDomains))
+	for i, d := range effectiveDomains {
+		if strings.TrimSpace(d.ZoneID) == "" {
+			return fmt.Errorf("cloudflare.domains[%d].zone_id is required", i)
+		}
+		domainName := strings.ToLower(strings.TrimSpace(d.Domain))
+		if domainName == "" {
+			return fmt.Errorf("cloudflare.domains[%d].domain is required", i)
+		}
+		if _, exists := seenDomains[domainName]; exists {
+			return fmt.Errorf("duplicate cloudflare domain: %q", domainName)
+		}
+		seenDomains[domainName] = struct{}{}
+	}
+	activeDomain := strings.ToLower(strings.TrimSpace(cfg.Cloudflare.ActiveDomain))
+	if activeDomain == "" {
+		activeDomain = effectiveDomains[0].Domain
+	}
+	if _, ok := seenDomains[activeDomain]; !ok {
+		return fmt.Errorf("cloudflare.active_domain must be one of configured domains")
 	}
 
 	if cfg.Destination.Email == "" {

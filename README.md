@@ -103,8 +103,17 @@ cloudflare:
   api_token: "" # optional inline secret
   api_token_env: "CF_API_TOKEN" # recommended
   account_id: "xxxx"
-  zone_id: "yyyy"
-  domain: "example.com"
+  # Legacy single-domain fallback (tetap didukung):
+  # zone_id: "yyyy"
+  # domain: "example.com"
+
+  # Multi-domain (disarankan untuk all-zones token):
+  domains:
+    - domain: "example.com"
+      zone_id: "zone_id_example_com"
+    - domain: "example.net"
+      zone_id: "zone_id_example_net"
+  active_domain: "example.com"
   rule_name_prefix: "tuiotp"
   default_priority: 0
   enabled_by_default: true
@@ -183,9 +192,15 @@ Settings:
 Field yang bisa diedit saat ini:
 - `ui.clipboard.enabled`
 - `ui.clipboard.method`
+- `cloudflare.domains` (format `domain,zone_id`; separator: baris baru / `;` / `|`)
+- `cloudflare.active_domain`
 - `app.timezone`
 - `app.log_path`
 - `mailbox.imap.poll_interval`
+
+Mail Account panel:
+- `[` / `]` pindah active domain
+- `n` create alias baru (boleh isi local-part saja, otomatis `@active_domain`)
 
 ---
 

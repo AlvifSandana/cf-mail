@@ -347,9 +347,15 @@ func (m runtimeSettingsManager) Load(_ context.Context) (ui.SettingsState, error
 	if method == "" {
 		method = "auto"
 	}
+	domainLines := make([]string, 0, len(cfg.Cloudflare.EffectiveDomains()))
+	for _, d := range cfg.Cloudflare.EffectiveDomains() {
+		domainLines = append(domainLines, d.Domain+","+d.ZoneID)
+	}
 	return ui.SettingsState{
 		ClipboardEnabled: cfg.UI.Clipboard.Enabled,
 		ClipboardMethod:  method,
+		DomainsText:      strings.Join(domainLines, "\n"),
+		ActiveDomain:     cfg.Cloudflare.EffectiveActiveDomain(),
 		Timezone:         strings.TrimSpace(cfg.App.Timezone),
 		LogPath:          strings.TrimSpace(cfg.App.LogPath),
 		IMAPPollInterval: strings.TrimSpace(cfg.Mailbox.IMAP.PollInterval),
@@ -369,6 +375,19 @@ func (m runtimeSettingsManager) SaveAndApply(_ context.Context, state ui.Setting
 
 	cfg.UI.Clipboard.Enabled = state.ClipboardEnabled
 	cfg.UI.Clipboard.Method = method
+	cfg.Cloudflare.ActiveDomain = strings.ToLower(strings.TrimSpace(state.ActiveDomain))
+	domains, err := parseSettingsDomains(state.DomainsText)
+	if err != nil {
+		return ui.SettingsState{}, nil, err
+	}
+	if len(domains) > 0 {
+		cfg.Cloudflare.Domains = domains
+		cfg.Cloudflare.ZoneID = domains[0].ZoneID
+		cfg.Cloudflare.Domain = domains[0].Domain
+		if strings.TrimSpace(cfg.Cloudflare.ActiveDomain) == "" {
+			cfg.Cloudflare.ActiveDomain = domains[0].Domain
+		}
+	}
 	cfg.App.Timezone = strings.TrimSpace(state.Timezone)
 	cfg.App.LogPath = strings.TrimSpace(state.LogPath)
 	cfg.Mailbox.IMAP.PollInterval = strings.TrimSpace(state.IMAPPollInterval)
@@ -400,13 +419,55 @@ func (m runtimeSettingsManager) SaveAndApply(_ context.Context, state ui.Setting
 		clip = nil
 	}
 
+	domainLines := make([]string, 0, len(cfg.Cloudflare.EffectiveDomains()))
+	for _, d := range cfg.Cloudflare.EffectiveDomains() {
+		domainLines = append(domainLines, d.Domain+","+d.ZoneID)
+	}
 	return ui.SettingsState{
 		ClipboardEnabled: cfg.UI.Clipboard.Enabled,
 		ClipboardMethod:  method,
+		DomainsText:      strings.Join(domainLines, "\n"),
+		ActiveDomain:     cfg.Cloudflare.EffectiveActiveDomain(),
 		Timezone:         strings.TrimSpace(cfg.App.Timezone),
 		LogPath:          strings.TrimSpace(cfg.App.LogPath),
 		IMAPPollInterval: strings.TrimSpace(cfg.Mailbox.IMAP.PollInterval),
 	}, clip, nil
+}
+
+func parseSettingsDomains(v string) ([]config.CloudflareDomain, error) {
+	normalized := strings.TrimSpace(v)
+	lines := strings.FieldsFunc(normalized, func(r rune) bool {
+		switch r {
+		case '\n', ';', '|':
+			return true
+		default:
+			return false
+		}
+	})
+	if len(lines) == 1 && strings.TrimSpace(lines[0]) == "" {
+		return nil, nil
+	}
+	if len(lines) == 0 {
+		return nil, nil
+	}
+	out := make([]config.CloudflareDomain, 0, len(lines))
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, ",")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid domains line %d: expected domain,zone_id", i+1)
+		}
+		domainName := strings.ToLower(strings.TrimSpace(parts[0]))
+		zoneID := strings.TrimSpace(parts[1])
+		if domainName == "" || zoneID == "" {
+			return nil, fmt.Errorf("invalid domains line %d: domain and zone_id are required", i+1)
+		}
+		out = append(out, config.CloudflareDomain{Domain: domainName, ZoneID: zoneID})
+	}
+	return out, nil
 }
 
 func (a reconnectRuntimeRunnerAdapter) Run(ctx context.Context, onUpdate func(ports.WatchUpdate)) error {

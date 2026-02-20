@@ -124,6 +124,81 @@ mailbox:
 	}
 }
 
+func TestLoad_NormalizesCloudflareDomainsAndDerivesLegacyFields(t *testing.T) {
+	path := writeTempConfig(t, `
+cloudflare:
+  api_token: "token-inline"
+  active_domain: "  EXAMPLE.NET  "
+  domains:
+    - domain: " Example.com "
+      zone_id: " zone-1 "
+    - domain: "EXAMPLE.NET"
+      zone_id: "zone-2"
+destination:
+  email: "dest@example.com"
+mailbox:
+  mode: "imap"
+  imap:
+    host: "imap.gmail.com"
+    port: 993
+    tls: true
+    username: "user@example.com"
+    password: "pass-inline"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if len(cfg.Cloudflare.Domains) != 2 {
+		t.Fatalf("expected 2 cloudflare domains, got %d", len(cfg.Cloudflare.Domains))
+	}
+	if cfg.Cloudflare.Domains[0].Domain != "example.com" || cfg.Cloudflare.Domains[0].ZoneID != "zone-1" {
+		t.Fatalf("unexpected normalized first domain: %+v", cfg.Cloudflare.Domains[0])
+	}
+	if cfg.Cloudflare.ZoneID != "zone-1" || cfg.Cloudflare.Domain != "example.com" {
+		t.Fatalf("expected legacy fields derived from first domain, got zone=%q domain=%q", cfg.Cloudflare.ZoneID, cfg.Cloudflare.Domain)
+	}
+	if cfg.Cloudflare.ActiveDomain != "example.net" {
+		t.Fatalf("expected normalized active domain example.net, got %q", cfg.Cloudflare.ActiveDomain)
+	}
+}
+
+func TestLoad_LegacyDomainConfigDerivesDomainsAndActive(t *testing.T) {
+	path := writeTempConfig(t, `
+cloudflare:
+  api_token: "token-inline"
+  zone_id: "zone-legacy"
+  domain: "Legacy.Example.com"
+destination:
+  email: "dest@example.com"
+mailbox:
+  mode: "imap"
+  imap:
+    host: "imap.gmail.com"
+    port: 993
+    tls: true
+    username: "user@example.com"
+    password: "pass-inline"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if len(cfg.Cloudflare.Domains) != 1 {
+		t.Fatalf("expected 1 derived cloudflare domain, got %d", len(cfg.Cloudflare.Domains))
+	}
+	if cfg.Cloudflare.Domains[0].Domain != "legacy.example.com" || cfg.Cloudflare.Domains[0].ZoneID != "zone-legacy" {
+		t.Fatalf("unexpected derived domain entry: %+v", cfg.Cloudflare.Domains[0])
+	}
+	if cfg.Cloudflare.ActiveDomain != "legacy.example.com" {
+		t.Fatalf("expected derived active domain legacy.example.com, got %q", cfg.Cloudflare.ActiveDomain)
+	}
+}
+
 func TestLoad_UnknownFieldFails(t *testing.T) {
 	path := writeTempConfig(t, `
 app:
@@ -280,4 +355,59 @@ func TestValidate_AllowsMissingAccountIDWhenDestinationVerificationDisabled(t *t
 	if err := Validate(cfg); err != nil {
 		t.Fatalf("Validate() unexpected error when require_verified=false: %v", err)
 	}
+}
+
+func TestValidate_CloudflareDomainsRules(t *testing.T) {
+	t.Run("duplicate domains rejected case insensitive", func(t *testing.T) {
+		cfg := baseValidConfig()
+		cfg.Cloudflare.Domains = []CloudflareDomain{
+			{ZoneID: "z1", Domain: "Example.com"},
+			{ZoneID: "z2", Domain: "example.COM"},
+		}
+		cfg.Cloudflare.ActiveDomain = "example.com"
+		if err := Validate(cfg); err == nil {
+			t.Fatalf("expected duplicate domain validation error")
+		}
+	})
+
+	t.Run("active domain must be configured", func(t *testing.T) {
+		cfg := baseValidConfig()
+		cfg.Cloudflare.Domains = []CloudflareDomain{{ZoneID: "z1", Domain: "example.com"}}
+		cfg.Cloudflare.ActiveDomain = "other.com"
+		if err := Validate(cfg); err == nil {
+			t.Fatalf("expected active domain validation error")
+		}
+	})
+
+	t.Run("domain entry requires zone and domain", func(t *testing.T) {
+		cfg := baseValidConfig()
+		cfg.Cloudflare.Domains = []CloudflareDomain{{ZoneID: "", Domain: "example.com"}}
+		if err := Validate(cfg); err == nil {
+			t.Fatalf("expected missing zone_id validation error")
+		}
+
+		cfg = baseValidConfig()
+		cfg.Cloudflare.Domains = []CloudflareDomain{{ZoneID: "z1", Domain: ""}}
+		if err := Validate(cfg); err == nil {
+			t.Fatalf("expected missing domain validation error")
+		}
+	})
+
+	t.Run("missing active domain defaults to first effective", func(t *testing.T) {
+		cfg := baseValidConfig()
+		cfg.Cloudflare.Domains = []CloudflareDomain{{ZoneID: "z1", Domain: "example.com"}}
+		cfg.Cloudflare.ActiveDomain = ""
+		if err := Validate(cfg); err != nil {
+			t.Fatalf("expected validation success, got %v", err)
+		}
+	})
+
+	t.Run("legacy fallback still validates", func(t *testing.T) {
+		cfg := baseValidConfig()
+		cfg.Cloudflare.Domains = nil
+		cfg.Cloudflare.ActiveDomain = ""
+		if err := Validate(cfg); err != nil {
+			t.Fatalf("expected legacy config valid, got %v", err)
+		}
+	})
 }

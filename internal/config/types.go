@@ -1,5 +1,7 @@
 package config
 
+import "strings"
+
 type Config struct {
 	App         AppConfig         `yaml:"app"`
 	Cloudflare  CloudflareConfig  `yaml:"cloudflare"`
@@ -16,14 +18,63 @@ type AppConfig struct {
 }
 
 type CloudflareConfig struct {
-	APITokenEnv      string `yaml:"api_token_env"`
-	APIToken         string `yaml:"api_token"`
-	AccountID        string `yaml:"account_id"`
-	ZoneID           string `yaml:"zone_id"`
-	Domain           string `yaml:"domain"`
-	RuleNamePrefix   string `yaml:"rule_name_prefix"`
-	DefaultPriority  int    `yaml:"default_priority"`
-	EnabledByDefault bool   `yaml:"enabled_by_default"`
+	APITokenEnv      string             `yaml:"api_token_env"`
+	APIToken         string             `yaml:"api_token"`
+	AccountID        string             `yaml:"account_id"`
+	ZoneID           string             `yaml:"zone_id"`
+	Domain           string             `yaml:"domain"`
+	Domains          []CloudflareDomain `yaml:"domains"`
+	ActiveDomain     string             `yaml:"active_domain"`
+	RuleNamePrefix   string             `yaml:"rule_name_prefix"`
+	DefaultPriority  int                `yaml:"default_priority"`
+	EnabledByDefault bool               `yaml:"enabled_by_default"`
+}
+
+type CloudflareDomain struct {
+	ZoneID string `yaml:"zone_id"`
+	Domain string `yaml:"domain"`
+}
+
+func (c CloudflareConfig) EffectiveDomains() []CloudflareDomain {
+	if len(c.Domains) > 0 {
+		out := make([]CloudflareDomain, 0, len(c.Domains))
+		for _, d := range c.Domains {
+			zoneID := strings.TrimSpace(d.ZoneID)
+			domain := strings.ToLower(strings.TrimSpace(d.Domain))
+			if zoneID == "" || domain == "" {
+				continue
+			}
+			out = append(out, CloudflareDomain{ZoneID: zoneID, Domain: domain})
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+
+	zoneID := strings.TrimSpace(c.ZoneID)
+	domain := strings.ToLower(strings.TrimSpace(c.Domain))
+	if zoneID == "" || domain == "" {
+		return nil
+	}
+
+	return []CloudflareDomain{{ZoneID: zoneID, Domain: domain}}
+}
+
+func (c CloudflareConfig) EffectiveActiveDomain() string {
+	active := strings.ToLower(strings.TrimSpace(c.ActiveDomain))
+	domains := c.EffectiveDomains()
+	if len(domains) == 0 {
+		return ""
+	}
+	if active == "" {
+		return domains[0].Domain
+	}
+	for _, d := range domains {
+		if d.Domain == active {
+			return active
+		}
+	}
+	return active
 }
 
 type DestinationConfig struct {

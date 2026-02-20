@@ -29,9 +29,32 @@ func Load(path string) (*Config, error) {
 
 	cfg.Cloudflare.APIToken = strings.TrimSpace(cfg.Cloudflare.APIToken)
 	cfg.Cloudflare.APITokenEnv = strings.TrimSpace(cfg.Cloudflare.APITokenEnv)
+	cfg.Cloudflare.ZoneID = strings.TrimSpace(cfg.Cloudflare.ZoneID)
+	cfg.Cloudflare.Domain = strings.ToLower(strings.TrimSpace(cfg.Cloudflare.Domain))
+	cfg.Cloudflare.ActiveDomain = strings.ToLower(strings.TrimSpace(cfg.Cloudflare.ActiveDomain))
+	if len(cfg.Cloudflare.Domains) > 0 {
+		normalized := make([]CloudflareDomain, 0, len(cfg.Cloudflare.Domains))
+		for _, d := range cfg.Cloudflare.Domains {
+			normalized = append(normalized, CloudflareDomain{
+				ZoneID: strings.TrimSpace(d.ZoneID),
+				Domain: strings.ToLower(strings.TrimSpace(d.Domain)),
+			})
+		}
+		cfg.Cloudflare.Domains = normalized
+	}
 	if cfg.Cloudflare.APIToken == "" && cfg.Cloudflare.APITokenEnv != "" {
 		if token, ok := os.LookupEnv(cfg.Cloudflare.APITokenEnv); ok {
 			cfg.Cloudflare.APIToken = token
+		}
+	}
+
+	effective := cfg.Cloudflare.EffectiveDomains()
+	if len(effective) > 0 {
+		cfg.Cloudflare.Domains = effective
+		cfg.Cloudflare.ZoneID = effective[0].ZoneID
+		cfg.Cloudflare.Domain = effective[0].Domain
+		if cfg.Cloudflare.ActiveDomain == "" {
+			cfg.Cloudflare.ActiveDomain = effective[0].Domain
 		}
 	}
 

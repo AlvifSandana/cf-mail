@@ -23,9 +23,11 @@ const (
 	maxOTPQueryLen         = 120
 	maxAliasEmailLen       = 320
 	maxClipboardMethodLen  = 24
+	maxActiveDomainLen     = 253
 	maxTimezoneLen         = 64
 	maxLogPathLen          = 260
 	maxPollIntervalLen     = 24
+	maxDomainsTextLen      = 4096
 	sidebarWidth           = 42
 )
 
@@ -101,6 +103,8 @@ type Model struct {
 	settingsSelected     int
 	settingsEditing      bool
 	settingsMethodInput  string
+	settingsDomainsInput string
+	settingsActiveInput  string
 	settingsTZInput      string
 	settingsLogPathInput string
 	settingsPollInput    string
@@ -119,11 +123,16 @@ type rulesManager interface {
 	CreateRoutingRuleDirect(ctx context.Context, in ports.CreateRoutingRuleInput) (ports.RoutingRule, error)
 	UpdateRoutingRule(ctx context.Context, in ports.UpdateRoutingRuleInput) (ports.RoutingRule, error)
 	DeleteRoutingRuleByID(ctx context.Context, ruleID string) error
+	ListDomains() []string
+	ActiveDomain() string
+	SetActiveDomain(domain string) error
 }
 
 type SettingsState struct {
 	ClipboardEnabled bool
 	ClipboardMethod  string
+	DomainsText      string
+	ActiveDomain     string
 	Timezone         string
 	LogPath          string
 	IMAPPollInterval string
@@ -382,6 +391,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.settingsForm = normalizeSettingsState(msg.state)
 		m.settingsOriginal = m.settingsForm
 		m.settingsMethodInput = m.settingsForm.ClipboardMethod
+		m.settingsDomainsInput = m.settingsForm.DomainsText
+		m.settingsActiveInput = m.settingsForm.ActiveDomain
 		m.settingsTZInput = m.settingsForm.Timezone
 		m.settingsLogPathInput = m.settingsForm.LogPath
 		m.settingsPollInput = m.settingsForm.IMAPPollInterval
@@ -398,6 +409,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.settingsForm = normalizeSettingsState(msg.state)
 		m.settingsOriginal = m.settingsForm
 		m.settingsMethodInput = m.settingsForm.ClipboardMethod
+		m.settingsDomainsInput = m.settingsForm.DomainsText
+		m.settingsActiveInput = m.settingsForm.ActiveDomain
 		m.settingsTZInput = m.settingsForm.Timezone
 		m.settingsLogPathInput = m.settingsForm.LogPath
 		m.settingsPollInput = m.settingsForm.IMAPPollInterval
@@ -981,7 +994,7 @@ func (m Model) renderMailAccountCard(th theme, w, h int) string {
 
 	title := titleSt.Render("☁  Mail Account  " + th.mutedStyle.Render("live"))
 	body := m.mailAccountPanelView(w)
-	hint := th.mutedStyle.Render("  n new  e toggle  d del  r refresh  ↑↓ nav")
+	hint := th.mutedStyle.Render("  [/] domain  n new  e toggle  d del  r refresh  ↑↓ nav")
 
 	cardSt := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -1055,22 +1068,37 @@ func (m Model) settingsPanelView(w int) string {
 	if strings.TrimSpace(method) == "" {
 		method = "auto"
 	}
-	tz := strings.TrimSpace(m.settingsForm.Timezone)
+	domainsText := strings.TrimSpace(m.settingsForm.DomainsText)
 	if m.settingsEditing && m.settingsSelected == 2 {
+		domainsText = m.settingsDomainsInput
+	}
+	if domainsText == "" {
+		domainsText = "example.com,zone_id"
+	}
+	domainsInline := strings.ReplaceAll(domainsText, "\n", " | ")
+	activeDomain := strings.TrimSpace(m.settingsForm.ActiveDomain)
+	if m.settingsEditing && m.settingsSelected == 3 {
+		activeDomain = m.settingsActiveInput
+	}
+	if activeDomain == "" {
+		activeDomain = "(auto:first)"
+	}
+	tz := strings.TrimSpace(m.settingsForm.Timezone)
+	if m.settingsEditing && m.settingsSelected == 4 {
 		tz = m.settingsTZInput
 	}
 	if tz == "" {
 		tz = "local"
 	}
 	logPath := strings.TrimSpace(m.settingsForm.LogPath)
-	if m.settingsEditing && m.settingsSelected == 3 {
+	if m.settingsEditing && m.settingsSelected == 5 {
 		logPath = m.settingsLogPathInput
 	}
 	if logPath == "" {
 		logPath = "stderr"
 	}
 	poll := strings.TrimSpace(m.settingsForm.IMAPPollInterval)
-	if m.settingsEditing && m.settingsSelected == 4 {
+	if m.settingsEditing && m.settingsSelected == 6 {
 		poll = m.settingsPollInput
 	}
 	if poll == "" {
@@ -1094,7 +1122,7 @@ func (m Model) settingsPanelView(w int) string {
 	}
 
 	methodValue := method
-	if m.settingsEditing {
+	if m.settingsEditing && m.settingsSelected == 1 {
 		methodValue += "▌"
 	}
 
@@ -1103,20 +1131,32 @@ func (m Model) settingsPanelView(w int) string {
 		"",
 		row(m.settingsSelected == 0, "enabled", enabledLabel),
 		row(m.settingsSelected == 1, "method", methodValue),
-		row(m.settingsSelected == 2, "timezone", func() string {
+		row(m.settingsSelected == 2, "domains", func() string {
 			if m.settingsEditing && m.settingsSelected == 2 {
+				return domainsInline + "▌"
+			}
+			return domainsInline
+		}()),
+		row(m.settingsSelected == 3, "active_domain", func() string {
+			if m.settingsEditing && m.settingsSelected == 3 {
+				return activeDomain + "▌"
+			}
+			return activeDomain
+		}()),
+		row(m.settingsSelected == 4, "timezone", func() string {
+			if m.settingsEditing && m.settingsSelected == 4 {
 				return tz + "▌"
 			}
 			return tz
 		}()),
-		row(m.settingsSelected == 3, "log_path", func() string {
-			if m.settingsEditing && m.settingsSelected == 3 {
+		row(m.settingsSelected == 5, "log_path", func() string {
+			if m.settingsEditing && m.settingsSelected == 5 {
 				return logPath + "▌"
 			}
 			return logPath
 		}()),
-		row(m.settingsSelected == 4, "imap.poll_interval", func() string {
-			if m.settingsEditing && m.settingsSelected == 4 {
+		row(m.settingsSelected == 6, "imap.poll_interval", func() string {
+			if m.settingsEditing && m.settingsSelected == 6 {
 				return poll + "▌"
 			}
 			return poll
@@ -1630,6 +1670,16 @@ func normalizeSettingsState(in SettingsState) SettingsState {
 	if out.ClipboardMethod == "" || !isSupportedClipboardMethod(out.ClipboardMethod) {
 		out.ClipboardMethod = "auto"
 	}
+	out.DomainsText = strings.TrimSpace(out.DomainsText)
+	if utf8.RuneCountInString(out.DomainsText) > maxDomainsTextLen {
+		r := []rune(out.DomainsText)
+		out.DomainsText = string(r[:maxDomainsTextLen])
+	}
+	out.ActiveDomain = strings.ToLower(strings.TrimSpace(out.ActiveDomain))
+	if utf8.RuneCountInString(out.ActiveDomain) > maxActiveDomainLen {
+		r := []rune(out.ActiveDomain)
+		out.ActiveDomain = string(r[:maxActiveDomainLen])
+	}
 	out.Timezone = strings.TrimSpace(out.Timezone)
 	if utf8.RuneCountInString(out.Timezone) > maxTimezoneLen {
 		r := []rune(out.Timezone)
@@ -1665,10 +1715,14 @@ func (m Model) currentSettingsState() SettingsState {
 		case 1:
 			state.ClipboardMethod = m.settingsMethodInput
 		case 2:
-			state.Timezone = m.settingsTZInput
+			state.DomainsText = m.settingsDomainsInput
 		case 3:
-			state.LogPath = m.settingsLogPathInput
+			state.ActiveDomain = m.settingsActiveInput
 		case 4:
+			state.Timezone = m.settingsTZInput
+		case 5:
+			state.LogPath = m.settingsLogPathInput
+		case 6:
 			state.IMAPPollInterval = m.settingsPollInput
 		}
 	}
@@ -1778,9 +1832,16 @@ func (m Model) createCFRuleCmd(aliasEmail string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.opContext(), m.cfOpTimeout)
 		defer cancel()
+		aliasEmail = strings.TrimSpace(aliasEmail)
+		if aliasEmail != "" && !strings.Contains(aliasEmail, "@") {
+			activeDomain := strings.TrimSpace(m.rulesManager.ActiveDomain())
+			if activeDomain != "" {
+				aliasEmail = aliasEmail + "@" + activeDomain
+			}
+		}
 
 		rule, err := m.rulesManager.CreateRoutingRuleDirect(ctx, ports.CreateRoutingRuleInput{
-			AliasEmail: strings.TrimSpace(aliasEmail),
+			AliasEmail: aliasEmail,
 			Enabled:    true,
 		})
 		if err != nil {
@@ -1930,6 +1991,55 @@ func (m Model) updateMailAccountPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	}
 
 	switch key {
+	case "[":
+		if m.rulesManager == nil {
+			return m, nil, true
+		}
+		domains := m.rulesManager.ListDomains()
+		if len(domains) == 0 {
+			return m, nil, true
+		}
+		active := strings.ToLower(strings.TrimSpace(m.rulesManager.ActiveDomain()))
+		idx := 0
+		for i, d := range domains {
+			if strings.ToLower(strings.TrimSpace(d)) == active {
+				idx = i
+				break
+			}
+		}
+		next := idx - 1
+		if next < 0 {
+			next = len(domains) - 1
+		}
+		if err := m.rulesManager.SetActiveDomain(domains[next]); err != nil {
+			toastCmd := showToast(&m, ToastError, userSafeError("switch active domain", err))
+			return m, toastCmd, true
+		}
+		toastCmd := showToast(&m, ToastInfo, "active domain: "+domains[next])
+		return m, tea.Batch(toastCmd, m.refreshCFRulesCmd()), true
+	case "]":
+		if m.rulesManager == nil {
+			return m, nil, true
+		}
+		domains := m.rulesManager.ListDomains()
+		if len(domains) == 0 {
+			return m, nil, true
+		}
+		active := strings.ToLower(strings.TrimSpace(m.rulesManager.ActiveDomain()))
+		idx := 0
+		for i, d := range domains {
+			if strings.ToLower(strings.TrimSpace(d)) == active {
+				idx = i
+				break
+			}
+		}
+		next := (idx + 1) % len(domains)
+		if err := m.rulesManager.SetActiveDomain(domains[next]); err != nil {
+			toastCmd := showToast(&m, ToastError, userSafeError("switch active domain", err))
+			return m, toastCmd, true
+		}
+		toastCmd := showToast(&m, ToastInfo, "active domain: "+domains[next])
+		return m, tea.Batch(toastCmd, m.refreshCFRulesCmd()), true
 	case "n":
 		if m.rulesManager == nil {
 			toastCmd := showToast(&m, ToastError, "rules manager unavailable")
@@ -2010,6 +2120,8 @@ func (m Model) updateSettingsPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		case "esc":
 			m.settingsEditing = false
 			m.settingsMethodInput = m.settingsForm.ClipboardMethod
+			m.settingsDomainsInput = m.settingsForm.DomainsText
+			m.settingsActiveInput = m.settingsForm.ActiveDomain
 			m.settingsTZInput = m.settingsForm.Timezone
 			m.settingsLogPathInput = m.settingsForm.LogPath
 			m.settingsPollInput = m.settingsForm.IMAPPollInterval
@@ -2023,18 +2135,30 @@ func (m Model) updateSettingsPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 					m.settingsForm.ClipboardMethod = "auto"
 				}
 			case 2:
+				m.settingsForm.DomainsText = strings.TrimSpace(m.settingsDomainsInput)
+				if utf8.RuneCountInString(m.settingsForm.DomainsText) > maxDomainsTextLen {
+					r := []rune(m.settingsForm.DomainsText)
+					m.settingsForm.DomainsText = string(r[:maxDomainsTextLen])
+				}
+			case 3:
+				m.settingsForm.ActiveDomain = strings.ToLower(strings.TrimSpace(m.settingsActiveInput))
+				if utf8.RuneCountInString(m.settingsForm.ActiveDomain) > maxActiveDomainLen {
+					r := []rune(m.settingsForm.ActiveDomain)
+					m.settingsForm.ActiveDomain = string(r[:maxActiveDomainLen])
+				}
+			case 4:
 				m.settingsForm.Timezone = strings.TrimSpace(m.settingsTZInput)
 				if utf8.RuneCountInString(m.settingsForm.Timezone) > maxTimezoneLen {
 					r := []rune(m.settingsForm.Timezone)
 					m.settingsForm.Timezone = string(r[:maxTimezoneLen])
 				}
-			case 3:
+			case 5:
 				m.settingsForm.LogPath = strings.TrimSpace(m.settingsLogPathInput)
 				if utf8.RuneCountInString(m.settingsForm.LogPath) > maxLogPathLen {
 					r := []rune(m.settingsForm.LogPath)
 					m.settingsForm.LogPath = string(r[:maxLogPathLen])
 				}
-			case 4:
+			case 6:
 				m.settingsForm.IMAPPollInterval = strings.TrimSpace(m.settingsPollInput)
 				if utf8.RuneCountInString(m.settingsForm.IMAPPollInterval) > maxPollIntervalLen {
 					r := []rune(m.settingsForm.IMAPPollInterval)
@@ -2044,10 +2168,14 @@ func (m Model) updateSettingsPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 			return m, nil, true
 		case "backspace":
 			if m.settingsSelected == 2 {
-				m.settingsTZInput = trimLastRune(m.settingsTZInput)
+				m.settingsDomainsInput = trimLastRune(m.settingsDomainsInput)
 			} else if m.settingsSelected == 3 {
-				m.settingsLogPathInput = trimLastRune(m.settingsLogPathInput)
+				m.settingsActiveInput = trimLastRune(m.settingsActiveInput)
 			} else if m.settingsSelected == 4 {
+				m.settingsTZInput = trimLastRune(m.settingsTZInput)
+			} else if m.settingsSelected == 5 {
+				m.settingsLogPathInput = trimLastRune(m.settingsLogPathInput)
+			} else if m.settingsSelected == 6 {
 				m.settingsPollInput = trimLastRune(m.settingsPollInput)
 			} else {
 				m.settingsMethodInput = trimLastRune(m.settingsMethodInput)
@@ -2058,14 +2186,22 @@ func (m Model) updateSettingsPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 				r := msg.Runes[0]
 				if r >= 32 && r != 127 {
 					if m.settingsSelected == 2 {
+						if utf8.RuneCountInString(m.settingsDomainsInput) < maxDomainsTextLen {
+							m.settingsDomainsInput += string(r)
+						}
+					} else if m.settingsSelected == 3 {
+						if utf8.RuneCountInString(m.settingsActiveInput) < maxActiveDomainLen {
+							m.settingsActiveInput += string(r)
+						}
+					} else if m.settingsSelected == 4 {
 						if utf8.RuneCountInString(m.settingsTZInput) < maxTimezoneLen {
 							m.settingsTZInput += string(r)
 						}
-					} else if m.settingsSelected == 3 {
+					} else if m.settingsSelected == 5 {
 						if utf8.RuneCountInString(m.settingsLogPathInput) < maxLogPathLen {
 							m.settingsLogPathInput += string(r)
 						}
-					} else if m.settingsSelected == 4 {
+					} else if m.settingsSelected == 6 {
 						if utf8.RuneCountInString(m.settingsPollInput) < maxPollIntervalLen {
 							m.settingsPollInput += string(r)
 						}
@@ -2085,7 +2221,7 @@ func (m Model) updateSettingsPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		}
 		return m, nil, true
 	case "down", "j":
-		if m.settingsSelected < 4 {
+		if m.settingsSelected < 6 {
 			m.settingsSelected++
 		}
 		return m, nil, true
@@ -2096,10 +2232,14 @@ func (m Model) updateSettingsPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		}
 		m.settingsEditing = true
 		if m.settingsSelected == 2 {
-			m.settingsTZInput = m.settingsForm.Timezone
+			m.settingsDomainsInput = m.settingsForm.DomainsText
 		} else if m.settingsSelected == 3 {
-			m.settingsLogPathInput = m.settingsForm.LogPath
+			m.settingsActiveInput = m.settingsForm.ActiveDomain
 		} else if m.settingsSelected == 4 {
+			m.settingsTZInput = m.settingsForm.Timezone
+		} else if m.settingsSelected == 5 {
+			m.settingsLogPathInput = m.settingsForm.LogPath
+		} else if m.settingsSelected == 6 {
 			m.settingsPollInput = m.settingsForm.IMAPPollInterval
 		} else {
 			m.settingsMethodInput = m.settingsForm.ClipboardMethod
@@ -2112,10 +2252,14 @@ func (m Model) updateSettingsPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		}
 		m.settingsEditing = true
 		if m.settingsSelected == 2 {
-			m.settingsTZInput = m.settingsForm.Timezone
+			m.settingsDomainsInput = m.settingsForm.DomainsText
 		} else if m.settingsSelected == 3 {
-			m.settingsLogPathInput = m.settingsForm.LogPath
+			m.settingsActiveInput = m.settingsForm.ActiveDomain
 		} else if m.settingsSelected == 4 {
+			m.settingsTZInput = m.settingsForm.Timezone
+		} else if m.settingsSelected == 5 {
+			m.settingsLogPathInput = m.settingsForm.LogPath
+		} else if m.settingsSelected == 6 {
 			m.settingsPollInput = m.settingsForm.IMAPPollInterval
 		} else {
 			m.settingsMethodInput = m.settingsForm.ClipboardMethod
@@ -2145,6 +2289,8 @@ func (m Model) updateSettingsPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		}
 		m.settingsForm = m.settingsOriginal
 		m.settingsMethodInput = m.settingsForm.ClipboardMethod
+		m.settingsDomainsInput = m.settingsForm.DomainsText
+		m.settingsActiveInput = m.settingsForm.ActiveDomain
 		m.settingsTZInput = m.settingsForm.Timezone
 		m.settingsLogPathInput = m.settingsForm.LogPath
 		m.settingsPollInput = m.settingsForm.IMAPPollInterval
@@ -2176,7 +2322,7 @@ func (m Model) mailAccountPanelView(w int) string {
 		emailValue := m.createAliasEmail + "▌"
 		emailField := activeFieldSt.Render(emailValue)
 
-		hint := th.mutedStyle.Render("  enter submit  esc cancel")
+		hint := th.mutedStyle.Render("  local-part ok (auto @active)  enter submit  esc cancel")
 
 		return strings.Join([]string{
 			th.accentStyle.Render("  ✚ New Mail Account"),
@@ -2208,6 +2354,16 @@ func (m Model) mailAccountPanelView(w int) string {
 	}
 
 	// ── Empty state ──────────────────────────────────────────────────────────
+	activeDomain := ""
+	lines := make([]string, 0, len(m.cfRules)+3)
+	if m.rulesManager != nil {
+		activeDomain = strings.TrimSpace(m.rulesManager.ActiveDomain())
+	}
+	if activeDomain != "" {
+		lines = append(lines, th.mutedStyle.Render("  active domain: "+activeDomain))
+		lines = append(lines, "")
+	}
+
 	if len(m.cfRules) == 0 {
 		return lipgloss.NewStyle().
 			Foreground(th.muted).
@@ -2216,8 +2372,6 @@ func (m Model) mailAccountPanelView(w int) string {
 	}
 
 	// ── Mail Account list ────────────────────────────────────────────────────
-	lines := make([]string, 0, len(m.cfRules)+1)
-
 	for i, rule := range m.cfRules {
 		cursor := "  "
 		emailSt := lipgloss.NewStyle().Foreground(th.muted)

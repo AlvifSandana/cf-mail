@@ -42,20 +42,32 @@ func NewWithContext(ctx context.Context, cfg *config.Config) (*App, error) {
 		return nil, fmt.Errorf("run sqlite migrations: %w", err)
 	}
 
-	cfClient, err := cloudflare.NewClient(cloudflare.ClientConfig{
-		APIToken:   cfg.Cloudflare.APIToken,
-		AccountID:  cfg.Cloudflare.AccountID,
-		ZoneID:     cfg.Cloudflare.ZoneID,
-		MaxRetries: 3,
-	})
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("init cloudflare client: %w", err)
+	effectiveDomains := cfg.Cloudflare.EffectiveDomains()
+	cfClients := make(map[string]aliasCloudflarePort, len(effectiveDomains))
+	for _, d := range effectiveDomains {
+		cfClient, err := cloudflare.NewClient(cloudflare.ClientConfig{
+			APIToken:   cfg.Cloudflare.APIToken,
+			AccountID:  cfg.Cloudflare.AccountID,
+			ZoneID:     d.ZoneID,
+			MaxRetries: 3,
+		})
+		if err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("init cloudflare client for domain %s: %w", d.Domain, err)
+		}
+		cfClients[d.Domain] = aliasCloudflareAdapter{client: cfClient}
 	}
 
-	if err := cfClient.EnsureDestinationVerified(ctx, cfg.Destination.Email, cfg.Destination.RequireVerified); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("ensure destination verified: %w", err)
+	for _, d := range effectiveDomains {
+		client, ok := cfClients[d.Domain]
+		if !ok {
+			_ = db.Close()
+			return nil, fmt.Errorf("cloudflare client missing for domain %s", d.Domain)
+		}
+		if err := client.EnsureDestinationVerified(ctx, cfg.Destination.Email, cfg.Destination.RequireVerified); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("ensure destination verified for domain %s: %w", d.Domain, err)
+		}
 	}
 
 	rules := make([]parser.Rule, 0, len(cfg.OTP.Rules))
@@ -110,9 +122,16 @@ func NewWithContext(ctx context.Context, cfg *config.Config) (*App, error) {
 		return nil, fmt.Errorf("init otp service: %w", err)
 	}
 
-	aliasSvc, err := NewAliasService(aliasCloudflareAdapter{client: cfClient}, aliasRepositoryAdapter{repo: aliasRepo}, AliasServiceConfig{
+	domainNames := make([]string, 0, len(effectiveDomains))
+	for _, d := range effectiveDomains {
+		domainNames = append(domainNames, d.Domain)
+	}
+	aliasSvc, err := NewAliasService(nil, aliasRepositoryAdapter{repo: aliasRepo}, AliasServiceConfig{
 		DestinationEmail: cfg.Destination.Email,
 		AliasDomain:      cfg.Cloudflare.Domain,
+		Domains:          domainNames,
+		ActiveDomain:     cfg.Cloudflare.EffectiveActiveDomain(),
+		DomainClients:    cfClients,
 		RequireVerified:  cfg.Destination.RequireVerified,
 		RuleNamePrefix:   cfg.Cloudflare.RuleNamePrefix,
 		DefaultPriority:  cfg.Cloudflare.DefaultPriority,

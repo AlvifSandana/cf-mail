@@ -8,6 +8,7 @@ import (
 	"net/mail"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"tuiotp/internal/domain"
@@ -21,11 +22,14 @@ type aliasCloudflarePort = ports.AliasCloudflareClient
 type aliasRepositoryPort = ports.AliasRepository
 
 type AliasService struct {
-	cf   aliasCloudflarePort
 	repo aliasRepositoryPort
 
+	clientsByDomain map[string]aliasCloudflarePort
+	domains         []string
+	activeDomain    string
+	mu              sync.RWMutex
+
 	destinationEmail   string
-	aliasDomain        string
 	requireVerified    bool
 	ruleNamePrefix     string
 	defaultPriority    int
@@ -36,6 +40,9 @@ type AliasService struct {
 type AliasServiceConfig struct {
 	DestinationEmail string
 	AliasDomain      string
+	Domains          []string
+	ActiveDomain     string
+	DomainClients    map[string]aliasCloudflarePort
 	RequireVerified  bool
 	RuleNamePrefix   string
 	DefaultPriority  int
@@ -48,9 +55,6 @@ type CreateAliasInput struct {
 }
 
 func NewAliasService(cf aliasCloudflarePort, repo aliasRepositoryPort, cfg AliasServiceConfig) (*AliasService, error) {
-	if cf == nil {
-		return nil, fmt.Errorf("alias service cloudflare client is nil")
-	}
 	if repo == nil {
 		return nil, fmt.Errorf("alias service repository is nil")
 	}
@@ -65,16 +69,67 @@ func NewAliasService(cf aliasCloudflarePort, repo aliasRepositoryPort, cfg Alias
 		rulePrefix = "tuiotp"
 	}
 
-	aliasDomain := strings.ToLower(strings.TrimSpace(cfg.AliasDomain))
-	if aliasDomain == "" {
-		return nil, fmt.Errorf("alias domain is required")
+	clientsByDomain := make(map[string]aliasCloudflarePort)
+	domains := make([]string, 0)
+	if len(cfg.DomainClients) > 0 {
+		for rawDomain, client := range cfg.DomainClients {
+			domainName := strings.ToLower(strings.TrimSpace(rawDomain))
+			if domainName == "" {
+				continue
+			}
+			if client == nil {
+				return nil, fmt.Errorf("cloudflare client is nil for domain %q", domainName)
+			}
+			if _, exists := clientsByDomain[domainName]; !exists {
+				domains = append(domains, domainName)
+			}
+			clientsByDomain[domainName] = client
+		}
+	}
+	if len(clientsByDomain) == 0 {
+		aliasDomain := strings.ToLower(strings.TrimSpace(cfg.AliasDomain))
+		if aliasDomain == "" {
+			return nil, fmt.Errorf("alias domain is required")
+		}
+		if cf == nil {
+			return nil, fmt.Errorf("alias service cloudflare client is nil")
+		}
+		clientsByDomain[aliasDomain] = cf
+		domains = append(domains, aliasDomain)
+	}
+	if len(cfg.Domains) > 0 {
+		preferred := make([]string, 0, len(cfg.Domains))
+		for _, d := range cfg.Domains {
+			domainName := strings.ToLower(strings.TrimSpace(d))
+			if domainName == "" {
+				continue
+			}
+			if _, ok := clientsByDomain[domainName]; !ok {
+				return nil, fmt.Errorf("missing cloudflare client for domain %q", domainName)
+			}
+			preferred = append(preferred, domainName)
+		}
+		if len(preferred) > 0 {
+			domains = preferred
+		}
+	}
+	if len(domains) == 0 {
+		return nil, fmt.Errorf("at least one alias domain is required")
+	}
+	activeDomain := strings.ToLower(strings.TrimSpace(cfg.ActiveDomain))
+	if activeDomain == "" {
+		activeDomain = domains[0]
+	}
+	if _, ok := clientsByDomain[activeDomain]; !ok {
+		return nil, fmt.Errorf("active domain is not configured")
 	}
 
 	return &AliasService{
-		cf:                 cf,
 		repo:               repo,
+		clientsByDomain:    clientsByDomain,
+		domains:            append([]string(nil), domains...),
+		activeDomain:       activeDomain,
 		destinationEmail:   destinationEmail,
-		aliasDomain:        aliasDomain,
 		requireVerified:    cfg.RequireVerified,
 		ruleNamePrefix:     rulePrefix,
 		defaultPriority:    cfg.DefaultPriority,
@@ -83,22 +138,53 @@ func NewAliasService(cf aliasCloudflarePort, repo aliasRepositoryPort, cfg Alias
 	}, nil
 }
 
+func (s *AliasService) ListDomains() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, len(s.domains))
+	copy(out, s.domains)
+	return out
+}
+
+func (s *AliasService) ActiveDomain() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.activeDomain
+}
+
+func (s *AliasService) SetActiveDomain(domainName string) error {
+	if s == nil {
+		return domain.WrapValidation("alias service is nil", nil)
+	}
+	domainName = strings.ToLower(strings.TrimSpace(domainName))
+	if domainName == "" {
+		return domain.WrapValidation("active domain is required", nil)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.clientsByDomain[domainName]; !ok {
+		return domain.WrapValidation("active domain is not configured", nil)
+	}
+	s.activeDomain = domainName
+	return nil
+}
+
 func (s *AliasService) CreateAlias(ctx context.Context, in CreateAliasInput) (domain.Alias, error) {
 	if s == nil {
 		return domain.Alias{}, domain.WrapValidation("alias service is nil", nil)
 	}
 
-	aliasEmail, err := normalizeEmail(in.AliasEmail)
+	aliasEmail, aliasDomain, err := s.normalizeAliasEmail(in.AliasEmail)
 	if err != nil {
 		return domain.Alias{}, domain.WrapValidation("invalid alias email", err)
 	}
 	parts := strings.SplitN(aliasEmail, "@", 2)
-	if len(parts) != 2 || strings.TrimSpace(parts[1]) == "" {
-		return domain.Alias{}, domain.WrapValidation("invalid alias email: missing domain", nil)
-	}
-	if parts[1] != s.aliasDomain {
-		return domain.Alias{}, domain.WrapValidation("alias email domain must match configured domain", nil)
-	}
 
 	platform := strings.ToUpper(strings.TrimSpace(in.Platform))
 	if platform == "" {
@@ -108,14 +194,19 @@ func (s *AliasService) CreateAlias(ctx context.Context, in CreateAliasInput) (do
 		return domain.Alias{}, domain.WrapValidation("invalid platform format", nil)
 	}
 
-	if err := s.cf.EnsureDestinationVerified(ctx, s.destinationEmail, s.requireVerified); err != nil {
+	cfClient, err := s.clientForDomain(aliasDomain)
+	if err != nil {
+		return domain.Alias{}, err
+	}
+
+	if err := cfClient.EnsureDestinationVerified(ctx, s.destinationEmail, s.requireVerified); err != nil {
 		return domain.Alias{}, domain.WrapDependency("ensure destination verified", err)
 	}
 
 	localPart := parts[0]
 	ruleName := buildRuleName(s.ruleNamePrefix, platform, localPart)
 
-	rule, err := s.cf.CreateRoutingRule(ctx, ports.CreateRoutingRuleInput{
+	rule, err := cfClient.CreateRoutingRule(ctx, ports.CreateRoutingRuleInput{
 		Name:        ruleName,
 		AliasEmail:  aliasEmail,
 		Destination: []string{s.destinationEmail},
@@ -138,7 +229,7 @@ func (s *AliasService) CreateAlias(ctx context.Context, in CreateAliasInput) (do
 			rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			if rollbackErr := s.cf.DeleteRoutingRule(rollbackCtx, rule.ID); rollbackErr != nil {
+			if rollbackErr := cfClient.DeleteRoutingRule(rollbackCtx, rule.ID); rollbackErr != nil {
 				return domain.Alias{}, errors.Join(
 					domain.WrapDependency("store alias metadata", err),
 					domain.WrapDependency("rollback delete rule failed", rollbackErr),
@@ -181,7 +272,16 @@ func (s *AliasService) DeleteAlias(ctx context.Context, aliasEmail string) error
 		return domain.WrapDependency("find active alias", err)
 	}
 
-	if err := s.cf.DeleteRoutingRule(ctx, selected.RuleID); err != nil {
+	_, aliasDomain, splitErr := splitAliasEmail(normalized)
+	if splitErr != nil {
+		return splitErr
+	}
+	cfClient, err := s.clientForDomain(aliasDomain)
+	if err != nil {
+		return err
+	}
+
+	if err := cfClient.DeleteRoutingRule(ctx, selected.RuleID); err != nil {
 		return domain.WrapDependency("delete routing rule", err)
 	}
 
@@ -201,7 +301,12 @@ func (s *AliasService) ListRoutingRules(ctx context.Context) ([]ports.RoutingRul
 		return nil, domain.WrapValidation("alias service is nil", nil)
 	}
 
-	rules, err := s.cf.ListRoutingRules(ctx, ports.ListRoutingRulesFilter{})
+	cfClient, err := s.activeClient()
+	if err != nil {
+		return nil, err
+	}
+
+	rules, err := cfClient.ListRoutingRules(ctx, ports.ListRoutingRulesFilter{})
 	if err != nil {
 		return nil, domain.WrapDependency("list routing rules", err)
 	}
@@ -220,7 +325,12 @@ func (s *AliasService) UpdateRoutingRule(ctx context.Context, in ports.UpdateRou
 		return ports.RoutingRule{}, domain.WrapValidation("rule id is required", nil)
 	}
 
-	rule, err := s.cf.UpdateRoutingRule(ctx, in)
+	cfClient, err := s.resolveClientForRuleInput(in.AliasEmail)
+	if err != nil {
+		return ports.RoutingRule{}, err
+	}
+
+	rule, err := cfClient.UpdateRoutingRule(ctx, in)
 	if err != nil {
 		return ports.RoutingRule{}, domain.WrapDependency("update routing rule", err)
 	}
@@ -235,12 +345,17 @@ func (s *AliasService) CreateRoutingRuleDirect(ctx context.Context, in ports.Cre
 		return ports.RoutingRule{}, domain.WrapValidation("alias service is nil", nil)
 	}
 
-	in.AliasEmail = strings.ToLower(strings.TrimSpace(in.AliasEmail))
+	normalizedAlias, aliasDomain, err := s.normalizeAliasEmail(in.AliasEmail)
+	if err != nil {
+		return ports.RoutingRule{}, domain.WrapValidation("invalid alias email", err)
+	}
+	in.AliasEmail = normalizedAlias
 	if in.AliasEmail == "" {
 		return ports.RoutingRule{}, domain.WrapValidation("alias email is required", nil)
 	}
-	if _, err := parseAddress(in.AliasEmail); err != nil {
-		return ports.RoutingRule{}, domain.WrapValidation("invalid alias email", err)
+	cfClient, err := s.clientForDomain(aliasDomain)
+	if err != nil {
+		return ports.RoutingRule{}, err
 	}
 
 	if len(in.Destination) == 0 {
@@ -255,7 +370,7 @@ func (s *AliasService) CreateRoutingRuleDirect(ctx context.Context, in ports.Cre
 		in.Name = buildRuleName(s.ruleNamePrefix, "", localPart)
 	}
 
-	rule, err := s.cf.CreateRoutingRule(ctx, in)
+	rule, err := cfClient.CreateRoutingRule(ctx, in)
 	if err != nil {
 		return ports.RoutingRule{}, domain.WrapDependency("create routing rule direct", err)
 	}
@@ -275,11 +390,93 @@ func (s *AliasService) DeleteRoutingRuleByID(ctx context.Context, ruleID string)
 		return domain.WrapValidation("rule id is required", nil)
 	}
 
-	if err := s.cf.DeleteRoutingRule(ctx, ruleID); err != nil {
+	cfClient, err := s.activeClient()
+	if err != nil {
+		return err
+	}
+
+	if err := cfClient.DeleteRoutingRule(ctx, ruleID); err != nil {
 		return domain.WrapDependency("delete routing rule by id", err)
 	}
 
 	return nil
+}
+
+func (s *AliasService) activeClient() (aliasCloudflarePort, error) {
+	if s == nil {
+		return nil, domain.WrapValidation("alias service is nil", nil)
+	}
+	s.mu.RLock()
+	active := s.activeDomain
+	client := s.clientsByDomain[active]
+	s.mu.RUnlock()
+	if client == nil {
+		return nil, domain.WrapValidation("active domain is not configured", nil)
+	}
+	return client, nil
+}
+
+func (s *AliasService) clientForDomain(domainName string) (aliasCloudflarePort, error) {
+	if s == nil {
+		return nil, domain.WrapValidation("alias service is nil", nil)
+	}
+	domainName = strings.ToLower(strings.TrimSpace(domainName))
+	if domainName == "" {
+		return nil, domain.WrapValidation("alias email domain is required", nil)
+	}
+	s.mu.RLock()
+	client := s.clientsByDomain[domainName]
+	s.mu.RUnlock()
+	if client == nil {
+		return nil, domain.WrapValidation("alias email domain is not configured", nil)
+	}
+	return client, nil
+}
+
+func (s *AliasService) resolveClientForRuleInput(aliasEmail string) (aliasCloudflarePort, error) {
+	aliasEmail = strings.TrimSpace(aliasEmail)
+	if aliasEmail == "" {
+		return s.activeClient()
+	}
+	_, domainName, err := splitAliasEmail(strings.ToLower(aliasEmail))
+	if err != nil {
+		return nil, err
+	}
+	return s.clientForDomain(domainName)
+}
+
+func (s *AliasService) normalizeAliasEmail(v string) (string, string, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", "", domain.WrapValidation("alias email is required", nil)
+	}
+	if !strings.Contains(v, "@") {
+		activeDomain := s.ActiveDomain()
+		if activeDomain == "" {
+			return "", "", domain.WrapValidation("active domain is not configured", nil)
+		}
+		v = v + "@" + activeDomain
+	}
+	normalized, err := normalizeEmail(v)
+	if err != nil {
+		return "", "", err
+	}
+	_, domainName, err := splitAliasEmail(normalized)
+	if err != nil {
+		return "", "", err
+	}
+	if _, err := s.clientForDomain(domainName); err != nil {
+		return "", "", err
+	}
+	return normalized, domainName, nil
+}
+
+func splitAliasEmail(aliasEmail string) (string, string, error) {
+	parts := strings.SplitN(strings.ToLower(strings.TrimSpace(aliasEmail)), "@", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", "", domain.WrapValidation("invalid alias email: missing domain", nil)
+	}
+	return parts[0], parts[1], nil
 }
 
 func normalizeEmail(v string) (string, error) {

@@ -357,6 +357,112 @@ func TestAliasService_CreateAlias_DomainMismatchRejected(t *testing.T) {
 	}
 }
 
+func TestAliasService_CreateAlias_LocalPartAppendsActiveDomain(t *testing.T) {
+	cf := &fakeCloudflare{}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(cf, repo, AliasServiceConfig{DestinationEmail: "inbox@example.com", AliasDomain: "example.com"})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	created, err := svc.CreateAlias(context.Background(), CreateAliasInput{
+		Platform:   "CUSTOM",
+		AliasEmail: "custom-001",
+	})
+	if err != nil {
+		t.Fatalf("CreateAlias() error = %v", err)
+	}
+	if created.AliasEmail != "custom-001@example.com" {
+		t.Fatalf("expected auto-appended alias domain, got %q", created.AliasEmail)
+	}
+}
+
+func TestAliasService_CreateAlias_UnknownDomainRejected(t *testing.T) {
+	cf := &fakeCloudflare{}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(cf, repo, AliasServiceConfig{DestinationEmail: "inbox@example.com", AliasDomain: "example.com"})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	_, err = svc.CreateAlias(context.Background(), CreateAliasInput{
+		Platform:   "CUSTOM",
+		AliasEmail: "custom@other.com",
+	})
+	if err == nil || !strings.Contains(err.Error(), "domain") {
+		t.Fatalf("expected unknown domain validation error, got %v", err)
+	}
+}
+
+func TestAliasService_ActiveDomainSwitch(t *testing.T) {
+	cf1 := &fakeCloudflare{}
+	cf2 := &fakeCloudflare{}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(nil, repo, AliasServiceConfig{
+		DestinationEmail: "inbox@example.com",
+		DomainClients: map[string]aliasCloudflarePort{
+			"example.com": cf1,
+			"example.net": cf2,
+		},
+		Domains:      []string{"example.com", "example.net"},
+		ActiveDomain: "example.com",
+	})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	if svc.ActiveDomain() != "example.com" {
+		t.Fatalf("expected active domain example.com, got %q", svc.ActiveDomain())
+	}
+	if err := svc.SetActiveDomain("example.net"); err != nil {
+		t.Fatalf("SetActiveDomain() error = %v", err)
+	}
+	if svc.ActiveDomain() != "example.net" {
+		t.Fatalf("expected active domain example.net, got %q", svc.ActiveDomain())
+	}
+	if err := svc.SetActiveDomain("unknown.com"); err == nil {
+		t.Fatalf("expected error switching to unknown domain")
+	}
+}
+
+func TestAliasService_PerDomainRoutingClientSelection(t *testing.T) {
+	cfCom := &fakeCloudflare{}
+	cfNet := &fakeCloudflare{}
+	repo := &fakeAliasRepo{}
+
+	svc, err := NewAliasService(nil, repo, AliasServiceConfig{
+		DestinationEmail: "inbox@example.com",
+		DomainClients: map[string]aliasCloudflarePort{
+			"example.com": cfCom,
+			"example.net": cfNet,
+		},
+		Domains:      []string{"example.com", "example.net"},
+		ActiveDomain: "example.net",
+	})
+	if err != nil {
+		t.Fatalf("NewAliasService() error = %v", err)
+	}
+
+	_, err = svc.CreateAlias(context.Background(), CreateAliasInput{Platform: "SHOP", AliasEmail: "shop"})
+	if err != nil {
+		t.Fatalf("CreateAlias() error = %v", err)
+	}
+	if cfNet.createCalls != 1 || cfCom.createCalls != 0 {
+		t.Fatalf("expected active domain client to handle create, net=%d com=%d", cfNet.createCalls, cfCom.createCalls)
+	}
+
+	_, err = svc.CreateRoutingRuleDirect(context.Background(), ports.CreateRoutingRuleInput{AliasEmail: "abc@example.com"})
+	if err != nil {
+		t.Fatalf("CreateRoutingRuleDirect() error = %v", err)
+	}
+	if cfCom.createCalls != 1 {
+		t.Fatalf("expected .com client used for explicit alias domain, got %d", cfCom.createCalls)
+	}
+}
+
 func TestAliasService_NewAliasService_AliasDomainRequired(t *testing.T) {
 	cf := &fakeCloudflare{}
 	repo := &fakeAliasRepo{}
@@ -549,7 +655,7 @@ func TestAliasService_CreateRoutingRuleDirect_InvalidEmailRejected(t *testing.T)
 	}
 
 	_, err = svc.CreateRoutingRuleDirect(context.Background(), ports.CreateRoutingRuleInput{
-		AliasEmail: "not-valid-email",
+		AliasEmail: "bad@@example.com",
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid alias email") {
 		t.Fatalf("expected invalid email error, got %v", err)
