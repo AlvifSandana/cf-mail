@@ -268,6 +268,10 @@ LIMIT 1`
 		}
 	}
 
+	if in.OTPCode == "" {
+		return false, nil
+	}
+
 	const byWindow = `
 SELECT 1
 FROM otp_events

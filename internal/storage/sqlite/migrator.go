@@ -27,6 +27,18 @@ func Open(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("ping sqlite db: %w", err)
 	}
 
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA foreign_keys=ON",
+		"PRAGMA busy_timeout=5000",
+	}
+	for _, p := range pragmas {
+		if _, err := db.Exec(p); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("exec %s: %w", p, err)
+		}
+	}
+
 	return db, nil
 }
 

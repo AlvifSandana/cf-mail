@@ -105,24 +105,17 @@ func (r *Reconnector) Run(ctx context.Context, onUpdate func(WatchUpdate)) error
 
 		if runErr == nil {
 			attempt = 0
-		} else {
-			onUpdate(WatchUpdate{Mode: "reconnecting", Timestamp: r.nowFn().UTC()})
-			if err := r.waitBackoff(ctx, attempt); err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return nil
-				}
-				return fmt.Errorf("reconnect backoff wait: %w", err)
-			}
-			attempt = r.nextStep(attempt)
 			continue
 		}
 
+		onUpdate(WatchUpdate{Mode: "reconnecting", Timestamp: r.nowFn().UTC()})
 		if err := r.waitBackoff(ctx, attempt); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil
 			}
 			return fmt.Errorf("reconnect backoff wait: %w", err)
 		}
+		attempt = r.nextStep(attempt)
 	}
 }
 

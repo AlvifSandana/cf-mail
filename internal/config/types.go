@@ -75,7 +75,8 @@ func (c CloudflareConfig) EffectiveActiveDomain() string {
 			return active
 		}
 	}
-	return active
+	// Fallback to first configured domain if active_domain is not found.
+	return domains[0].Domain
 }
 
 type DestinationConfig struct {

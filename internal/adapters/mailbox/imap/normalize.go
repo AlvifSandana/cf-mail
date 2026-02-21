@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 const defaultSnippetMax = 280
@@ -243,6 +244,11 @@ func truncateBytes(v string, maxBytes int) string {
 	}
 	if len(v) <= maxBytes {
 		return v
+	}
+	// Walk back to valid UTF-8 rune boundary to avoid cutting
+	// in the middle of a multi-byte character.
+	for maxBytes > 0 && !utf8.RuneStart(v[maxBytes]) {
+		maxBytes--
 	}
 	return v[:maxBytes]
 }

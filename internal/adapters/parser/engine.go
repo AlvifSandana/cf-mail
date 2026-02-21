@@ -154,6 +154,12 @@ func (e *Engine) Parse(in IncomingEmail) (ParsedOTP, error) {
 	return ParsedOTP{}, ErrNoRuleMatched
 }
 
+// matchFromContains checks if the sender address matches any of the contains tokens.
+// When at least one "secure" token (containing '@' or '.') is present, plain tokens
+// (e.g. "shopee", "no-reply") are ignored to prevent overly broad matching.
+// This means: from_contains: ["shopee.co.id", "no-reply"] will ONLY match
+// against the domain "shopee.co.id" — the plain token "no-reply" is skipped.
+// If only plain tokens are present, they match against the sender local part exactly.
 func matchFromContains(fromLower string, contains []string) bool {
 	fromLower = strings.ToLower(strings.TrimSpace(fromLower))
 	if fromLower == "" {

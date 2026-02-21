@@ -58,75 +58,10 @@ func (e *HTTPStatusError) Error() string {
 }
 
 func NewClient(cfg ClientConfig) (*Client, error) {
-	if strings.TrimSpace(cfg.APIToken) == "" {
-		return nil, fmt.Errorf("cloudflare api token is required")
-	}
 	if strings.TrimSpace(cfg.ZoneID) == "" {
 		return nil, fmt.Errorf("cloudflare zone id is required")
 	}
-
-	baseURL := strings.TrimSpace(cfg.BaseURL)
-	if baseURL == "" {
-		baseURL = defaultBaseURL
-	}
-
-	parsedBaseURL, err := url.Parse(baseURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse cloudflare base url: %w", err)
-	}
-	if parsedBaseURL.Hostname() == "" {
-		return nil, fmt.Errorf("cloudflare base url host is required")
-	}
-	if !cfg.AllowInsecureBaseURL && !strings.EqualFold(parsedBaseURL.Scheme, "https") {
-		return nil, fmt.Errorf("cloudflare base url must use https")
-	}
-
-	allowedHosts := cfg.AllowedHosts
-	if len(allowedHosts) == 0 {
-		allowedHosts = []string{"api.cloudflare.com"}
-	}
-	if !hostAllowed(parsedBaseURL.Hostname(), allowedHosts) {
-		return nil, fmt.Errorf("cloudflare base url host %q is not allowed", parsedBaseURL.Hostname())
-	}
-
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = 15 * time.Second
-	}
-
-	maxRetries := cfg.MaxRetries
-	if maxRetries < 0 {
-		maxRetries = 0
-	}
-
-	baseBackoff := cfg.BaseBackoff
-	if baseBackoff <= 0 {
-		baseBackoff = 300 * time.Millisecond
-	}
-
-	maxBackoff := cfg.MaxBackoff
-	if maxBackoff <= 0 {
-		maxBackoff = 3 * time.Second
-	}
-
-	userAgent := strings.TrimSpace(cfg.UserAgent)
-	if userAgent == "" {
-		userAgent = "tuiotp/0.1"
-	}
-
-	return &Client{
-		apiToken:  cfg.APIToken,
-		accountID: strings.TrimSpace(cfg.AccountID),
-		zoneID:    cfg.ZoneID,
-
-		baseURL:     strings.TrimRight(parsedBaseURL.String(), "/"),
-		httpClient:  &http.Client{Timeout: timeout},
-		maxRetries:  maxRetries,
-		baseBackoff: baseBackoff,
-		maxBackoff:  maxBackoff,
-		userAgent:   userAgent,
-		sleepFn:     sleepWithContext,
-	}, nil
+	return newClient(cfg)
 }
 
 // NewDiscoveryClient creates a Client without requiring a ZoneID.
@@ -134,6 +69,10 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 // before the zone IDs are known. Operations that require a ZoneID
 // (routing rules, etc.) will fail if called on this client.
 func NewDiscoveryClient(cfg ClientConfig) (*Client, error) {
+	return newClient(cfg)
+}
+
+func newClient(cfg ClientConfig) (*Client, error) {
 	if strings.TrimSpace(cfg.APIToken) == "" {
 		return nil, fmt.Errorf("cloudflare api token is required")
 	}
@@ -337,7 +276,7 @@ func isIdempotentMethod(method string) bool {
 func isRetryableNetworkError(err error) bool {
 	var netErr net.Error
 	if ok := errors.As(err, &netErr); ok {
-		return netErr.Timeout() || netErr.Temporary()
+		return netErr.Timeout()
 	}
 	return false
 }

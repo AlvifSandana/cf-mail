@@ -408,7 +408,7 @@ func (m runtimeSettingsManager) SaveAndApply(_ context.Context, state ui.Setting
 		cfg.Mailbox.IMAP.Password = ""
 	}
 
-	if err := config.Validate(cfg); err != nil {
+	if err := config.ValidateForSave(cfg); err != nil {
 		return ui.SettingsState{}, nil, err
 	}
 	if err := config.Save(m.configPath, cfg); err != nil {
@@ -544,6 +544,9 @@ type connectorWatchClient struct {
 	connector *imap.Connector
 }
 
+// Idle is not yet implemented. The go-imap v1 library requires manual
+// IDLE command handling. For now, the watcher always falls back to polling.
+// TODO: Implement IMAP IDLE using go-imap idle extension.
 func (connectorWatchClient) Idle(context.Context, func() error) error {
 	return imap.ErrIdleUnsupported
 }

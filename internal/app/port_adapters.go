@@ -32,7 +32,7 @@ func (a aliasCloudflareAdapter) CreateRoutingRule(ctx context.Context, in ports.
 		return ports.RoutingRule{}, err
 	}
 
-	return ports.RoutingRule{ID: r.ID, Name: r.Name, Enabled: r.Enabled}, nil
+	return mapCloudflareRuleToPort(r), nil
 }
 
 func (a aliasCloudflareAdapter) DeleteRoutingRule(ctx context.Context, ruleID string) error {

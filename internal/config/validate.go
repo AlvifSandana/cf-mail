@@ -8,7 +8,20 @@ import (
 	"time"
 )
 
+// Validate performs full validation of the config including all secret fields.
 func Validate(cfg *Config) error {
+	return validate(cfg, false)
+}
+
+// ValidateForSave performs validation suitable for the settings-save flow.
+// When skipEnvSecrets is true, api_token and imap password are not required
+// if the corresponding _env field is set, since the actual secret is resolved
+// at runtime from the environment variable.
+func ValidateForSave(cfg *Config) error {
+	return validate(cfg, true)
+}
+
+func validate(cfg *Config, skipEnvSecrets bool) error {
 	if cfg == nil {
 		return fmt.Errorf("config is nil")
 	}
@@ -16,10 +29,14 @@ func Validate(cfg *Config) error {
 	token := strings.TrimSpace(cfg.Cloudflare.APIToken)
 	tokenEnv := strings.TrimSpace(cfg.Cloudflare.APITokenEnv)
 	if token == "" {
-		if tokenEnv == "" {
+		// When saving, skip token validation if _env is configured.
+		if skipEnvSecrets && tokenEnv != "" {
+			// ok — secret will be resolved from env at runtime
+		} else if tokenEnv == "" {
 			return fmt.Errorf("cloudflare.api_token or cloudflare.api_token_env is required")
+		} else {
+			return fmt.Errorf("cloudflare api token is empty (env var %q not set or empty)", tokenEnv)
 		}
-		return fmt.Errorf("cloudflare api token is empty (env var %q not set or empty)", tokenEnv)
 	}
 	if cfg.Destination.RequireVerified && strings.TrimSpace(cfg.Cloudflare.AccountID) == "" {
 		return fmt.Errorf("cloudflare.account_id is required when destination.require_verified=true")
@@ -89,10 +106,14 @@ func Validate(cfg *Config) error {
 		password := strings.TrimSpace(cfg.Mailbox.IMAP.Password)
 		passwordEnv := strings.TrimSpace(cfg.Mailbox.IMAP.PasswordEnv)
 		if password == "" {
-			if passwordEnv == "" {
+			// When saving, skip password validation if _env is configured.
+			if skipEnvSecrets && passwordEnv != "" {
+				// ok — secret will be resolved from env at runtime
+			} else if passwordEnv == "" {
 				return fmt.Errorf("mailbox.imap.password or mailbox.imap.password_env is required")
+			} else {
+				return fmt.Errorf("imap password is empty or not set")
 			}
-			return fmt.Errorf("imap password is empty or not set")
 		}
 		if !cfg.Mailbox.IMAP.TLS {
 			return fmt.Errorf("mailbox.imap.tls must be true")

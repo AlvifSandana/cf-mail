@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"tuiotp/internal/adapters/cloudflare"
 	"tuiotp/internal/domain"
 	"tuiotp/internal/ports"
 )
@@ -204,7 +205,7 @@ func (s *AliasService) CreateAlias(ctx context.Context, in CreateAliasInput) (do
 	}
 
 	localPart := parts[0]
-	ruleName := buildRuleName(s.ruleNamePrefix, platform, localPart)
+	ruleName := cloudflare.BuildRuleName(s.ruleNamePrefix, platform, localPart)
 
 	rule, err := cfClient.CreateRoutingRule(ctx, ports.CreateRoutingRuleInput{
 		Name:        ruleName,
@@ -367,7 +368,7 @@ func (s *AliasService) CreateRoutingRuleDirect(ctx context.Context, in ports.Cre
 		// Build a default rule name from alias email local part.
 		parts := strings.SplitN(in.AliasEmail, "@", 2)
 		localPart := parts[0]
-		in.Name = buildRuleName(s.ruleNamePrefix, "", localPart)
+		in.Name = cloudflare.BuildRuleName(s.ruleNamePrefix, "", localPart)
 	}
 
 	rule, err := cfClient.CreateRoutingRule(ctx, in)
@@ -495,23 +496,4 @@ func normalizeEmail(v string) (string, error) {
 
 func parseAddress(v string) (*mail.Address, error) {
 	return mail.ParseAddress(v)
-}
-
-func buildRuleName(prefix, platform, aliasLocalpart string) string {
-	prefix = strings.Trim(prefix, ": ")
-	platform = strings.ToUpper(strings.TrimSpace(platform))
-	aliasLocalpart = strings.TrimSpace(aliasLocalpart)
-
-	parts := make([]string, 0, 3)
-	if prefix != "" {
-		parts = append(parts, prefix)
-	}
-	if platform != "" {
-		parts = append(parts, platform)
-	}
-	if aliasLocalpart != "" {
-		parts = append(parts, aliasLocalpart)
-	}
-
-	return strings.Join(parts, ":")
 }

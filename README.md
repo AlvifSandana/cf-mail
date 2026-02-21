@@ -1,18 +1,20 @@
 # TUIOTP (Go TUI) — Cloudflare Email Alias + OTP Monitor
 
 TUIOTP adalah tool **Go TUI** untuk:
+
 1) **Generate email alias** lewat **Cloudflare Email Routing** (create routing rule),
 2) **Monitor email masuk** (IMAP IDLE/poll) dan **parse OTP**,
 3) **Delete alias** (hapus routing rule) untuk cleanup.
 
 > Cloudflare Email Routing Rules: matcher `to` + action `forward`.  
-> Docs: https://developers.cloudflare.com/api/resources/email_routing/subresources/rules/methods/create/
+> Docs: <https://developers.cloudflare.com/api/resources/email_routing/subresources/rules/methods/create/>
 
 ---
 
 ## Features (MVP)
+
 - Create/List/Delete Cloudflare Email Routing rules (alias management)
-- IMAP watcher (IDLE jika tersedia, fallback polling)
+- IMAP watcher (polling mode; IDLE planned untuk versi mendatang)
 - OTP parser berbasis rules (regex) + template output custom
 - OTP history (SQLite) + search
 - Copy OTP hotkey di TUI
@@ -20,9 +22,10 @@ TUIOTP adalah tool **Go TUI** untuk:
 ---
 
 ## Tech Stack
+
 - Go
-- TUI: Bubble Tea (Charmbracelet) — https://github.com/charmbracelet/bubbletea
-- IMAP: go-imap (IDLE supported) — https://pkg.go.dev/github.com/emersion/go-imap
+- TUI: Bubble Tea (Charmbracelet) — <https://github.com/charmbracelet/bubbletea>
+- IMAP: go-imap (IDLE supported) — <https://pkg.go.dev/github.com/emersion/go-imap>
 - DB: SQLite
 - Config: YAML
 
@@ -50,11 +53,13 @@ TUIOTP adalah tool **Go TUI** untuk:
 ## Quick Start
 
 ### 1) Prerequisites
+
 - Domain sudah aktif di Cloudflare + Email Routing enabled.
 - Cloudflare API Token dengan permission yang cukup untuk Email Routing.
 - IMAP credentials untuk destination inbox (disarankan app password jika Gmail).
 
 ### 2) Config
+
 Buat `config.yml` berdasarkan contoh di bawah.
 
 **Rekomendasi aman (default):** pakai `*_env` dan set secret via environment.
@@ -63,11 +68,13 @@ Buat `config.yml` berdasarkan contoh di bawah.
 dan `mailbox.imap.password` di `config.yml` lokal (jangan pernah di-commit).
 
 ### 3) Run
+
 ```bash
 go run ./cmd/tuiotp --config ./config.yml
 ```
 
 ### 4) Migration helper (opsional)
+
 Kalau kamu punya config lama yang masih env-only, gunakan helper ini:
 
 ```bash
@@ -165,6 +172,7 @@ ui:
 ## TUI Keybindings
 
 Global:
+
 - `q` quit
 - `?` toggle help
 - `r` refresh data
@@ -174,22 +182,26 @@ Global:
 - `l` jump to Logs panel
 
 Dashboard:
+
 - `n` new alias
 - `d` delete selected alias
 - `enter` alias detail
 - `o` otp history
 
 Detail/History:
+
 - `c` copy OTP
 - `b` / `esc` back
 
 Settings:
+
 - `↑↓` pilih field
 - `space` / `e` toggle/edit field
 - `enter` save + apply settings
 - `r` reset ke nilai terakhir yang sudah di-load
 
 Field yang bisa diedit saat ini:
+
 - `ui.clipboard.enabled`
 - `ui.clipboard.method`
 - `cloudflare.domains` (format `domain,zone_id`; separator: baris baru / `;` / `|`)
@@ -199,6 +211,7 @@ Field yang bisa diedit saat ini:
 - `mailbox.imap.poll_interval`
 
 Mail Account panel:
+
 - `[` / `]` pindah active domain
 - `n` create alias baru (boleh isi local-part saja, otomatis `@active_domain`)
 
@@ -207,6 +220,7 @@ Mail Account panel:
 ## SQLite Schema (MVP)
 
 `aliases`
+
 ```sql
 CREATE TABLE IF NOT EXISTS aliases (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -221,6 +235,7 @@ CREATE TABLE IF NOT EXISTS aliases (
 ```
 
 `otp_events`
+
 ```sql
 CREATE TABLE IF NOT EXISTS otp_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -240,20 +255,24 @@ CREATE TABLE IF NOT EXISTS otp_events (
 ## Architecture Notes
 
 ### Cloudflare Adapter
+
 - Operasi utama:
   - create/list/delete routing rules untuk alias.
 - Rule naming:
   - `tuiotp:<platform>:<alias>` agar mudah difilter saat list.
 
 Docs:
-- Email routing API: https://developers.cloudflare.com/api/resources/email_routing/
-- Create routing rule: https://developers.cloudflare.com/api/resources/email_routing/subresources/rules/methods/create/
+
+- Email routing API: <https://developers.cloudflare.com/api/resources/email_routing/>
+- Create routing rule: <https://developers.cloudflare.com/api/resources/email_routing/subresources/rules/methods/create/>
 
 ### IMAP Monitoring
+
 - Gunakan IMAP IDLE (push) jika server support.
-- Spec: RFC 2177 https://www.rfc-editor.org/rfc/rfc2177.html
+- Spec: RFC 2177 <https://www.rfc-editor.org/rfc/rfc2177.html>
 
 ### OTP Parser
+
 - Rule-based (regex):
   - match by From/Subject
   - extract OTP by regex capture group
@@ -262,6 +281,7 @@ Docs:
 ---
 
 ## Security
+
 - Jangan commit token/password ke Git.
 - Jika simpan secret di `config.yml`, pastikan file lokal saja dan permission ketat (mis. `chmod 600 config.yml`).
 - `api_token_env` dan `password_env` tetap bisa dipakai jika ingin secret di environment.
@@ -270,6 +290,7 @@ Docs:
 ---
 
 ## Roadmap (nice to have)
+
 - Auto TTL cleanup (hapus alias setelah X waktu)
 - Gmail API mode
 - Export OTP history (CSV/JSON)
@@ -278,4 +299,5 @@ Docs:
 ---
 
 ## License
+
 TBD

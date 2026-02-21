@@ -198,6 +198,11 @@ func (a *App) ClearOTPEvents(ctx context.Context, filter OTPDeleteFilter) (int64
 	return a.otpRepo.DeleteByFilter(ctx, ports.OTPDeleteFilter(filter))
 }
 
+// normalizeIncomingEmail sanitises and validates an incoming email before
+// further processing. The function directly imports the imap adapter's
+// NormalizeIncomingEmail utility. This is a pragmatic trade-off: introducing
+// a full port interface for a stateless normalisation helper would add
+// unnecessary abstraction without meaningful testability or flexibility gain.
 func normalizeIncomingEmail(in domain.IncomingEmail) (domain.IncomingEmail, error) {
 	n, err := imap.NormalizeIncomingEmail(imap.IncomingEmail{
 		To:         in.To,

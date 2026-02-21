@@ -222,9 +222,6 @@ func (c *RuntimeCoordinator) emit(evt RuntimeEvent) {
 	if c == nil || c.events == nil || c.nowFn == nil {
 		return
 	}
-	if evt.Type == RuntimeEventRuntimeError {
-		evt.Err = runtimeWatchFailedMessage
-	}
 	if evt.Timestamp.IsZero() {
 		evt.Timestamp = c.nowFn().UTC()
 	}
@@ -247,8 +244,12 @@ func (c *RuntimeCoordinator) emit(evt RuntimeEvent) {
 	}
 }
 
-func (c *RuntimeCoordinator) emitRuntimeError(runID uint64, _ error) {
-	c.emit(RuntimeEvent{Type: RuntimeEventRuntimeError, RunID: runID, Err: runtimeWatchFailedMessage})
+func (c *RuntimeCoordinator) emitRuntimeError(runID uint64, err error) {
+	errMsg := runtimeWatchFailedMessage
+	if err != nil {
+		errMsg = err.Error()
+	}
+	c.emit(RuntimeEvent{Type: RuntimeEventRuntimeError, RunID: runID, Err: errMsg})
 }
 
 func (c *RuntimeCoordinator) enqueueCriticalLocked(evt RuntimeEvent) {
@@ -273,10 +274,7 @@ func (c *RuntimeCoordinator) enqueueCriticalLocked(evt RuntimeEvent) {
 
 	filtered := make([]RuntimeEvent, 0, len(buffered)+1)
 	for _, e := range buffered {
-		if !isCriticalRuntimeEvent(e.Type) {
-			continue
-		}
-		if e.RunID != evt.RunID {
+		if e.RunID != evt.RunID && !isCriticalRuntimeEvent(e.Type) {
 			continue
 		}
 		filtered = append(filtered, e)
