@@ -43,6 +43,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	resolveCtx, resolveCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer resolveCancel()
+	if err := config.ResolveZones(resolveCtx, cfg); err != nil {
+		bootstrapLogger.Error("app.config.resolve_zones_failed", "failed to auto-discover zones", map[string]any{"error": err})
+		os.Exit(1)
+	}
+
 	if err := config.Validate(cfg); err != nil {
 		bootstrapLogger.Error("app.config.validate_failed", "failed to validate config", nil)
 		os.Exit(1)

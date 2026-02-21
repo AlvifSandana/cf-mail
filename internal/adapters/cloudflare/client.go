@@ -129,6 +129,79 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}, nil
 }
 
+// NewDiscoveryClient creates a Client without requiring a ZoneID.
+// This is used exclusively for the auto-discovery phase (e.g. ListZones)
+// before the zone IDs are known. Operations that require a ZoneID
+// (routing rules, etc.) will fail if called on this client.
+func NewDiscoveryClient(cfg ClientConfig) (*Client, error) {
+	if strings.TrimSpace(cfg.APIToken) == "" {
+		return nil, fmt.Errorf("cloudflare api token is required")
+	}
+
+	baseURL := strings.TrimSpace(cfg.BaseURL)
+	if baseURL == "" {
+		baseURL = defaultBaseURL
+	}
+
+	parsedBaseURL, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse cloudflare base url: %w", err)
+	}
+	if parsedBaseURL.Hostname() == "" {
+		return nil, fmt.Errorf("cloudflare base url host is required")
+	}
+	if !cfg.AllowInsecureBaseURL && !strings.EqualFold(parsedBaseURL.Scheme, "https") {
+		return nil, fmt.Errorf("cloudflare base url must use https")
+	}
+
+	allowedHosts := cfg.AllowedHosts
+	if len(allowedHosts) == 0 {
+		allowedHosts = []string{"api.cloudflare.com"}
+	}
+	if !hostAllowed(parsedBaseURL.Hostname(), allowedHosts) {
+		return nil, fmt.Errorf("cloudflare base url host %q is not allowed", parsedBaseURL.Hostname())
+	}
+
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+
+	maxRetries := cfg.MaxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+
+	baseBackoff := cfg.BaseBackoff
+	if baseBackoff <= 0 {
+		baseBackoff = 300 * time.Millisecond
+	}
+
+	maxBackoff := cfg.MaxBackoff
+	if maxBackoff <= 0 {
+		maxBackoff = 3 * time.Second
+	}
+
+	userAgent := strings.TrimSpace(cfg.UserAgent)
+	if userAgent == "" {
+		userAgent = "tuiotp/0.1"
+	}
+
+	return &Client{
+		apiToken:  cfg.APIToken,
+		accountID: strings.TrimSpace(cfg.AccountID),
+		zoneID:    strings.TrimSpace(cfg.ZoneID),
+
+		baseURL:     strings.TrimRight(parsedBaseURL.String(), "/"),
+		httpClient:  &http.Client{Timeout: timeout},
+		maxRetries:  maxRetries,
+		baseBackoff: baseBackoff,
+		maxBackoff:  maxBackoff,
+		userAgent:   userAgent,
+		sleepFn:     sleepWithContext,
+	}, nil
+}
+
 func (c *Client) ZoneID() string {
 	return c.zoneID
 }

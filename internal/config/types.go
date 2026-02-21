@@ -18,6 +18,7 @@ type AppConfig struct {
 }
 
 type CloudflareConfig struct {
+	AutoDiscover     bool               `yaml:"auto_discover"`
 	APITokenEnv      string             `yaml:"api_token_env"`
 	APIToken         string             `yaml:"api_token"`
 	AccountID        string             `yaml:"account_id"`

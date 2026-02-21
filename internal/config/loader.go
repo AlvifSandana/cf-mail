@@ -2,9 +2,12 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"strings"
+
+	"tuiotp/internal/adapters/cloudflare"
 
 	"gopkg.in/yaml.v3"
 )
@@ -67,4 +70,60 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// ResolveZones fetches zone information from the Cloudflare API when
+// auto_discover is enabled and no domains are explicitly configured.
+// This must be called after Load() and before Validate().
+func ResolveZones(ctx context.Context, cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+	if !cfg.Cloudflare.AutoDiscover {
+		return nil
+	}
+
+	// Skip if domains are already configured explicitly.
+	if len(cfg.Cloudflare.Domains) > 0 {
+		return nil
+	}
+
+	token := strings.TrimSpace(cfg.Cloudflare.APIToken)
+	if token == "" {
+		return fmt.Errorf("cloudflare.api_token is required for auto_discover")
+	}
+
+	client, err := cloudflare.NewDiscoveryClient(cloudflare.ClientConfig{
+		APIToken:   token,
+		AccountID:  strings.TrimSpace(cfg.Cloudflare.AccountID),
+		MaxRetries: 3,
+	})
+	if err != nil {
+		return fmt.Errorf("init cloudflare discovery client: %w", err)
+	}
+
+	zones, err := client.ListZones(ctx)
+	if err != nil {
+		return fmt.Errorf("auto-discover zones: %w", err)
+	}
+	if len(zones) == 0 {
+		return fmt.Errorf("auto_discover found no active zones for this API token")
+	}
+
+	domains := make([]CloudflareDomain, 0, len(zones))
+	for _, z := range zones {
+		domains = append(domains, CloudflareDomain{
+			ZoneID: z.ID,
+			Domain: z.Name,
+		})
+	}
+
+	cfg.Cloudflare.Domains = domains
+	cfg.Cloudflare.ZoneID = domains[0].ZoneID
+	cfg.Cloudflare.Domain = domains[0].Domain
+	if cfg.Cloudflare.ActiveDomain == "" {
+		cfg.Cloudflare.ActiveDomain = domains[0].Domain
+	}
+
+	return nil
 }

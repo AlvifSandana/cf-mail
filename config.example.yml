@@ -4,16 +4,23 @@ app:
   log_path: "./tuiotp.log"
 
 cloudflare:
+  # Aktifkan untuk otomatis mengambil domain & zone_id dari API token.
+  # API token harus memiliki permission Zone:Read.
+  # Jika diaktifkan dan domains[] tidak diisi, aplikasi akan query
+  # Cloudflare API saat startup untuk mendapatkan daftar zone aktif.
+  auto_discover: true
+
   # Isi langsung token API (opsional jika pakai api_token_env).
   api_token: ""
   # Nama environment variable token (opsional jika api_token diisi).
   api_token_env: ""
   account_id: "your_account_id"
-  # Legacy single-domain fallback (tetap didukung):
+  # Legacy single-domain fallback (tetap didukung, di-skip jika auto_discover aktif):
   zone_id: "your_zone_id"
   domain: "example.com"
 
-  # Multi-domain (disarankan jika token mencakup banyak zone):
+  # Multi-domain (disarankan jika token mencakup banyak zone,
+  # di-skip jika auto_discover aktif):
   domains:
     - domain: "example.com"
       zone_id: "your_zone_id"
