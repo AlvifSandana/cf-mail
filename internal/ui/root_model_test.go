@@ -463,7 +463,7 @@ func TestModel_OTPPanel_ViewShowsLatestAndHistory(t *testing.T) {
 		{Platform: "TOKOPED", OTPCode: "999999", AliasEmail: "y@example.com", ReceivedAt: now.Add(-time.Minute)},
 	}
 
-	v := m.otpTimelineView(80)
+	v := m.otpTimelineView(80, 50)
 	if !contains(v, "SHOP") {
 		t.Fatalf("expected SHOP platform in timeline view")
 	}

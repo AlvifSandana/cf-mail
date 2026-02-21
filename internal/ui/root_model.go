@@ -76,6 +76,7 @@ type Model struct {
 	// Mail Account (CF routing rules) management
 	cfRules         []ports.RoutingRule
 	cfSelected      int
+	cfListStart     int // first visible row index for the Mail Account list viewport
 	cfDeleteConfirm bool
 
 	creating         bool
@@ -83,6 +84,7 @@ type Model struct {
 
 	otpEvents      []domain.OTPEvent
 	otpSelected    int
+	otpListStart   int // first visible row index for the OTP timeline viewport
 	otpDeleteMode  bool
 	otpDeleteScope string
 	otpSearchMode  bool
@@ -1039,7 +1041,13 @@ func (m Model) renderMailAccountCard(th theme, w, h int) string {
 		Padding(0, 1)
 
 	title := titleSt.Render("☁  Mail Account  " + th.mutedStyle.Render("live"))
-	body := m.mailAccountPanelView(w)
+	// Estimate available body lines: h minus borders(2) from card + title(1) + sep(1) + blank(1) + blank(1) + hint(1)
+	// lipgloss Height is the inner height, borders are outside that count, so subtract non-body inner lines.
+	bodyH := h - 5
+	if bodyH < 1 {
+		bodyH = 1
+	}
+	body := m.mailAccountPanelView(w, bodyH)
 	hint := th.mutedStyle.Render("  [ prev  ] next domain  n new  e toggle  d del  r refresh  ↑↓ nav")
 
 	cardSt := lipgloss.NewStyle().
@@ -1255,7 +1263,12 @@ func (m Model) renderOTPCard(th theme, w, h int) string {
 
 	sep := th.mutedStyle.Render(strings.Repeat("─", w-4))
 
-	timeline := m.otpTimelineView(w - 4)
+	// Estimate lines available for the timeline: h minus title(1)+sep(1)+blank(1)+blank(1)+detailSep(1)+detailTitle(1)+detail(~4)
+	timelineH := h - 10
+	if timelineH < 2 {
+		timelineH = 2
+	}
+	timeline := m.otpTimelineView(w-4, timelineH)
 	detailSep := th.mutedStyle.Render(strings.Repeat("─", w-4))
 	detailTitle := th.purpleStyle.Copy().Bold(true).Render("◈ Selected Detail")
 	detail := m.otpDetailView()
@@ -1493,8 +1506,9 @@ func (m Model) renderHelp(th theme) string {
 	return helpSt.Render(strings.Join(rows, "\n"))
 }
 
-// otpTimelineView renders the OTP event timeline table within the given width.
-func (m Model) otpTimelineView(w int) string {
+// otpTimelineView renders the OTP event timeline table within the given width and height.
+// h is the number of content rows available; rows outside the visible window are hidden.
+func (m Model) otpTimelineView(w, h int) string {
 	th := newTheme()
 
 	// Column widths that adapt to available w
@@ -1540,13 +1554,37 @@ func (m Model) otpTimelineView(w int) string {
 	))
 	sep := th.mutedStyle.Render("  " + strings.Repeat("─", sepW))
 
-	lines := make([]string, 0, len(m.otpEvents)+4)
+	lines := make([]string, 0, h+6)
+	prefix := []string{}
 	if m.otpSearchQuery != "" {
-		lines = append(lines, th.warnStyle.Render(fmt.Sprintf("  filter: %q", m.otpSearchQuery)))
+		prefix = append(prefix, th.warnStyle.Render(fmt.Sprintf("  filter: %q", m.otpSearchQuery)))
 	}
-	lines = append(lines, header, sep)
+	prefix = append(prefix, header, sep)
 
-	for i, evt := range m.otpEvents {
+	// Calculate viewport window for the list rows.
+	overhead := len(prefix) // rows taken by search-filter + header + sep
+	availRows := h - overhead
+	if availRows < 1 {
+		availRows = 1
+	}
+	start := m.otpListStart
+	if start < 0 {
+		start = 0
+	}
+	// Clamp start so the selected item is always visible (handles scroll-down).
+	if m.otpSelected >= start+availRows {
+		start = m.otpSelected - availRows + 1
+	}
+	if m.otpSelected < start {
+		start = m.otpSelected
+	}
+	end := start + availRows
+	if end > len(m.otpEvents) {
+		end = len(m.otpEvents)
+	}
+
+	for i, evt := range m.otpEvents[start:end] {
+		globalIdx := start + i
 		numSt := th.mutedStyle
 		platSt := th.accentStyle.Copy().Bold(false)
 		otpSt := lipgloss.NewStyle().Bold(true).Foreground(th.success)
@@ -1554,14 +1592,14 @@ func (m Model) otpTimelineView(w int) string {
 		timeSt := th.purpleStyle
 		cursor := "   "
 
-		if i == m.otpSelected {
+		if globalIdx == m.otpSelected {
 			cursor = th.accentStyle.Render(" ▶ ")
 			otpSt = lipgloss.NewStyle().Bold(true).Foreground(th.warning)
 		}
 
 		line := fmt.Sprintf("%s%s  %s  %s  %s  %s",
 			cursor,
-			numSt.Render(fmt.Sprintf("%-3d", i+1)),
+			numSt.Render(fmt.Sprintf("%-3d", globalIdx+1)),
 			platSt.Render(truncate(evt.Platform, 12)),
 			otpSt.Render(fmt.Sprintf("%-8s", evt.OTPCode)),
 			aliasSt.Render(truncate(fmt.Sprintf("%-*s", aliasW, evt.AliasEmail), aliasW)),
@@ -1569,6 +1607,16 @@ func (m Model) otpTimelineView(w int) string {
 		)
 		lines = append(lines, line)
 	}
+
+	// Scroll indicator when not at top/bottom.
+	if start > 0 {
+		lines = append([]string{th.mutedStyle.Render(fmt.Sprintf("  ↑ %d more above", start))}, lines...)
+	}
+	if end < len(m.otpEvents) {
+		lines = append(lines, th.mutedStyle.Render(fmt.Sprintf("  ↓ %d more below", len(m.otpEvents)-end)))
+	}
+
+	lines = append(prefix, lines...)
 
 	if m.otpDeleteMode {
 		scope := "selected"
@@ -2147,11 +2195,16 @@ func (m Model) updateMailAccountPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	case "up", "k":
 		if len(m.cfRules) > 0 && m.cfSelected > 0 {
 			m.cfSelected--
+			// Keep viewport start in sync so cursor stays visible.
+			if m.cfSelected < m.cfListStart {
+				m.cfListStart = m.cfSelected
+			}
 		}
 		return m, nil, true
 	case "down", "j":
 		if len(m.cfRules) > 0 && m.cfSelected < len(m.cfRules)-1 {
 			m.cfSelected++
+			// cfListStart clamping handled at render time via bodyH; nothing extra needed here.
 		}
 		return m, nil, true
 	}
@@ -2362,7 +2415,8 @@ func (m Model) updateSettingsPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	return m, nil, false
 }
 
-func (m Model) mailAccountPanelView(w int) string {
+// mailAccountPanelView renders the Mail Account list. h is the number of content rows available.
+func (m Model) mailAccountPanelView(w, h int) string {
 	th := newTheme()
 
 	inner := w - 4
@@ -2372,6 +2426,14 @@ func (m Model) mailAccountPanelView(w int) string {
 
 	// ── Create form ──────────────────────────────────────────────────────────
 	if m.creating {
+		activeDomainSuffix := ""
+		if m.rulesManager != nil {
+			ad := strings.TrimSpace(m.rulesManager.ActiveDomain())
+			if ad != "" {
+				activeDomainSuffix = "@" + ad
+			}
+		}
+
 		activeFieldSt := lipgloss.NewStyle().
 			Bold(true).Foreground(th.accent).
 			Border(lipgloss.NormalBorder(), false, false, true, false).
@@ -2379,10 +2441,11 @@ func (m Model) mailAccountPanelView(w int) string {
 			Width(inner - 14)
 
 		emailLabel := th.mutedStyle.Render("  email     ")
-		emailValue := m.createAliasEmail + "▌"
+		// Show the local-part the user is typing, then the auto-appended domain in muted colour.
+		emailValue := m.createAliasEmail + "▌" + th.mutedStyle.Render(activeDomainSuffix)
 		emailField := activeFieldSt.Render(emailValue)
 
-		hint := th.mutedStyle.Render("  local-part ok (auto @active)  enter submit  esc cancel")
+		hint := th.mutedStyle.Render("  type local-part only · enter submit · esc cancel")
 
 		return strings.Join([]string{
 			th.accentStyle.Render("  ✚ New Mail Account"),
@@ -2415,28 +2478,58 @@ func (m Model) mailAccountPanelView(w int) string {
 
 	// ── Empty state ──────────────────────────────────────────────────────────
 	activeDomain := ""
-	lines := make([]string, 0, len(m.cfRules)+3)
+	headerLines := make([]string, 0, 2)
 	if m.rulesManager != nil {
 		activeDomain = strings.TrimSpace(m.rulesManager.ActiveDomain())
 	}
 	if activeDomain != "" {
-		lines = append(lines, th.mutedStyle.Render("  active domain: "+activeDomain))
-		lines = append(lines, "")
+		headerLines = append(headerLines, th.mutedStyle.Render("  active domain: "+activeDomain))
+		headerLines = append(headerLines, "")
 	}
 
 	if len(m.cfRules) == 0 {
-		return lipgloss.NewStyle().
+		lines := append(headerLines, lipgloss.NewStyle().
 			Foreground(th.muted).
 			Italic(true).
-			Render("  no mail accounts  ·  press n")
+			Render("  no mail accounts  ·  press n"))
+		return strings.Join(lines, "\n")
 	}
 
-	// ── Mail Account list ────────────────────────────────────────────────────
-	for i, rule := range m.cfRules {
+	// ── Mail Account list (with viewport windowing) ───────────────────────
+	overhead := len(headerLines)
+	availRows := h - overhead
+	if availRows < 1 {
+		availRows = 1
+	}
+	start := m.cfListStart
+	if start < 0 {
+		start = 0
+	}
+	// Clamp start so the selected item is always visible (handles scroll-down).
+	if m.cfSelected >= start+availRows {
+		start = m.cfSelected - availRows + 1
+	}
+	if m.cfSelected < start {
+		start = m.cfSelected
+	}
+	end := start + availRows
+	if end > len(m.cfRules) {
+		end = len(m.cfRules)
+	}
+
+	lines := make([]string, 0, len(headerLines)+availRows+2)
+	lines = append(lines, headerLines...)
+
+	if start > 0 {
+		lines = append(lines, th.mutedStyle.Render(fmt.Sprintf("  ↑ %d more above", start)))
+	}
+
+	for i, rule := range m.cfRules[start:end] {
+		globalIdx := start + i
 		cursor := "  "
 		emailSt := lipgloss.NewStyle().Foreground(th.muted)
 
-		if i == m.cfSelected {
+		if globalIdx == m.cfSelected {
 			cursor = th.accentStyle.Render("▶ ")
 			emailSt = lipgloss.NewStyle().Foreground(th.fg)
 		}
@@ -2454,6 +2547,10 @@ func (m Model) mailAccountPanelView(w int) string {
 		line := cursor + dot + " " +
 			emailSt.Render(truncate(label, inner-4))
 		lines = append(lines, line)
+	}
+
+	if end < len(m.cfRules) {
+		lines = append(lines, th.mutedStyle.Render(fmt.Sprintf("  ↓ %d more below", len(m.cfRules)-end)))
 	}
 
 	return strings.Join(lines, "\n")
@@ -2596,11 +2693,16 @@ func (m Model) updateOTPPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	case "up", "k":
 		if len(m.otpEvents) > 0 && m.otpSelected > 0 {
 			m.otpSelected--
+			// Keep viewport start in sync so cursor stays visible.
+			if m.otpSelected < m.otpListStart {
+				m.otpListStart = m.otpSelected
+			}
 		}
 		return m, nil, true
 	case "down", "j":
 		if len(m.otpEvents) > 0 && m.otpSelected < len(m.otpEvents)-1 {
 			m.otpSelected++
+			// otpListStart clamping handled at render time via timelineH; nothing extra needed here.
 		}
 		return m, nil, true
 	}
