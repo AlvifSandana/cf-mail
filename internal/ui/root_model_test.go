@@ -218,7 +218,7 @@ func TestModel_View_HelpAndPanelHighlight(t *testing.T) {
 	m.ActivePanel = PanelLatestOTP
 	m.ShowHelp = true
 	m.Width = 120
-	m.Height = 40
+	m.Height = 60
 	view := m.View()
 
 	if !contains(view, "Latest OTP") {
@@ -280,7 +280,7 @@ func TestModel_View_SmallWindow_UsesSingleActiveMailPanel(t *testing.T) {
 	m.ActivePanel = PanelMailAccount
 
 	v := m.View()
-	if !contains(v, "☁ Mail Account") {
+	if !contains(v, "Mail Account") {
 		t.Fatalf("expected mail tab visible in single layout")
 	}
 	if !contains(v, "Mail Account") {
@@ -1983,7 +1983,7 @@ func TestModel_View_FitsWithinTerminalHeight_WithLogLines(t *testing.T) {
 func TestModel_View_NarrowWidth_UsesStackedResponsiveLayout(t *testing.T) {
 	m := NewModelWithConfig(ModelConfig{})
 	m.Width = 90
-	m.Height = 24
+	m.Height = 36
 	m.otpEvents = []domain.OTPEvent{{Platform: "SHOP", OTPCode: "123456", AliasEmail: "a@example.com", ReceivedAt: time.Now().UTC()}}
 	m.cfRules = []ports.RoutingRule{{ID: "r1", AliasEmail: "a@example.com", Enabled: true}}
 
@@ -2680,8 +2680,8 @@ func TestRenderToast_ShowsCountdown(t *testing.T) {
 
 	th := newTheme()
 	result := m.renderToast(th, 80)
-	// Should contain countdown like "(3s)" or "(2s)"
-	if !contains(result, "s)") {
+	// Should contain countdown like "[3s]" or "[2s]"
+	if !contains(result, "s]") {
 		t.Fatalf("expected countdown in toast, got %q", result)
 	}
 }

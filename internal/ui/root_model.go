@@ -575,6 +575,7 @@ type theme struct {
 	warning lipgloss.Color
 	danger  lipgloss.Color
 	purple  lipgloss.Color
+	cyan    lipgloss.Color
 
 	// derived styles
 	base         lipgloss.Style
@@ -585,19 +586,21 @@ type theme struct {
 	warnStyle    lipgloss.Style
 	errStyle     lipgloss.Style
 	purpleStyle  lipgloss.Style
+	cyanStyle    lipgloss.Style
 }
 
 func newTheme() theme {
 	t := theme{
-		bg:      lipgloss.Color("234"),
-		bgAlt:   lipgloss.Color("236"),
-		fg:      lipgloss.Color("253"),
-		muted:   lipgloss.Color("242"),
-		accent:  lipgloss.Color("39"),
-		success: lipgloss.Color("78"),
+		bg:      lipgloss.Color("233"),
+		bgAlt:   lipgloss.Color("235"),
+		fg:      lipgloss.Color("255"),
+		muted:   lipgloss.Color("243"),
+		accent:  lipgloss.Color("33"),
+		success: lipgloss.Color("48"),
 		warning: lipgloss.Color("214"),
 		danger:  lipgloss.Color("204"),
-		purple:  lipgloss.Color("135"),
+		purple:  lipgloss.Color("141"),
+		cyan:    lipgloss.Color("51"),
 	}
 
 	t.base = lipgloss.NewStyle().Foreground(t.fg)
@@ -608,6 +611,7 @@ func newTheme() theme {
 	t.warnStyle = lipgloss.NewStyle().Bold(true).Foreground(t.warning)
 	t.errStyle = lipgloss.NewStyle().Bold(true).Foreground(t.danger)
 	t.purpleStyle = lipgloss.NewStyle().Foreground(t.purple)
+	t.cyanStyle = lipgloss.NewStyle().Foreground(t.cyan)
 
 	return t
 }
@@ -775,7 +779,7 @@ func (m Model) renderMinimalView(th theme, totalW, totalH int) string {
 	}
 
 	lines := []string{
-		truncate("⚡ TUIOTP", totalW),
+		lipgloss.NewStyle().Bold(true).Foreground(th.cyan).Render(truncate("⚡ TUIOTP", totalW)),
 		truncate("Resize terminal for full dashboard", totalW),
 		truncate(fmt.Sprintf("OTP events: %d", len(m.otpEvents)), totalW),
 		truncate("keys: q quit  r refresh  o otp", totalW),
@@ -812,7 +816,8 @@ func (m Model) renderTopBar(th theme, totalW int) string {
 
 	now := time.Now().UTC().Format("15:04:05 UTC")
 	clock := lipgloss.NewStyle().
-		Foreground(th.accent).
+		Foreground(th.cyan).
+		Bold(true).
 		Render(now)
 	if totalW < 24 {
 		return lipgloss.NewStyle().
@@ -823,7 +828,12 @@ func (m Model) renderTopBar(th theme, totalW int) string {
 
 	domainIndicator := ""
 	if domainTag != "" {
-		domainIndicator = lipgloss.NewStyle().Foreground(th.accent).Bold(true).Render(domainTag)
+		domainIndicator = lipgloss.NewStyle().
+			Foreground(th.bg).
+			Background(th.accent).
+			Bold(true).
+			Padding(0, 1).
+			Render(domainTag)
 	}
 
 	logoText := brand + "  " + tagline
@@ -834,7 +844,7 @@ func (m Model) renderTopBar(th theme, totalW int) string {
 	if lipgloss.Width(logoText) > maxLogoW {
 		logoText = truncate(logoText, maxLogoW)
 	}
-	logo := th.accentStyle.Render(brand)
+	logo := lipgloss.NewStyle().Bold(true).Foreground(th.cyan).Render(brand)
 	if strings.HasPrefix(logoText, brand) {
 		rest := strings.TrimPrefix(logoText, brand)
 		logo += th.mutedStyle.Render(rest)
@@ -852,12 +862,19 @@ func (m Model) renderTopBar(th theme, totalW int) string {
 	topLine := lipgloss.NewStyle().
 		Background(th.bgAlt).
 		Width(totalW).
-		Render(logo + domainIndicator + strings.Repeat(" ", gap) + clock)
+		Render(logo + " " + domainIndicator + strings.Repeat(" ", gap) + clock)
+
+	// Thin separator line
+	sepLine := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("236")).
+		Background(th.bg).
+		Width(totalW).
+		Render(strings.Repeat("─", totalW))
 
 	// Tab bar
 	tabBar := m.renderTabBar(th, totalW)
 
-	return strings.Join([]string{topLine, tabBar}, "\n")
+	return strings.Join([]string{topLine, sepLine, tabBar}, "\n")
 }
 
 func (m Model) renderTabBar(th theme, totalW int) string {
@@ -869,30 +886,30 @@ func (m Model) renderTabBar(th theme, totalW int) string {
 	tabs := []tabDef{
 		{PanelLatestOTP, "OTP", "⚡"},
 		{PanelLogs, "Logs", "≡"},
-		{PanelMailAccount, "Mail Account", "☁"},
+		{PanelMailAccount, "Mail", "☁"},
 		{PanelSettings, "Settings", "⚙"},
 		{PanelStatus, "Health", "◈"},
 	}
 
 	activeTabSt := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(th.bg).
+		Foreground(lipgloss.Color("233")).
 		Background(th.accent).
 		Padding(0, 2)
 
 	inactiveTabSt := lipgloss.NewStyle().
-		Foreground(th.muted).
-		Background(lipgloss.Color("235")).
+		Foreground(lipgloss.Color("248")).
+		Background(lipgloss.Color("234")).
 		Padding(0, 2)
 
 	sepSt := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("237")).
-		Background(lipgloss.Color("235"))
+		Foreground(lipgloss.Color("238")).
+		Background(lipgloss.Color("234"))
 
 	parts := make([]string, 0, len(tabs)*2)
 	for i, t := range tabs {
 		if i > 0 {
-			parts = append(parts, sepSt.Render("│"))
+			parts = append(parts, sepSt.Render(" · "))
 		}
 		label := t.icon + " " + t.label
 		if m.ActivePanel == t.panel {
@@ -927,7 +944,7 @@ func (m Model) renderTabBar(th theme, totalW int) string {
 			}
 			plain := truncate(strings.Join(shortParts, " "), totalW)
 			return lipgloss.NewStyle().
-				Background(lipgloss.Color("235")).
+				Background(lipgloss.Color("234")).
 				Width(totalW).
 				Render(plain)
 		}
@@ -935,7 +952,7 @@ func (m Model) renderTabBar(th theme, totalW int) string {
 	pad := ""
 	if totalW > tabW {
 		pad = lipgloss.NewStyle().
-			Background(lipgloss.Color("235")).
+			Background(lipgloss.Color("234")).
 			Render(strings.Repeat(" ", totalW-tabW))
 	}
 
@@ -976,7 +993,7 @@ func (m Model) renderSidebar(th theme, w, totalH int, withLeftSeparator bool) st
 	// Left border line to visually separate from main content
 	borderSt := lipgloss.NewStyle().
 		Border(lipgloss.Border{Left: "│"}, false, false, false, true).
-		BorderForeground(lipgloss.Color("237")).
+		BorderForeground(lipgloss.Color("236")).
 		PaddingLeft(0)
 
 	return borderSt.Render(sidebar)
@@ -990,7 +1007,8 @@ func (m Model) renderHealthCard(th theme, w int) string {
 		Background(th.bgAlt).
 		Width(w).
 		Padding(0, 1)
-	title := titleSt.Render("◈ System Health")
+	accBar := lipgloss.NewStyle().Foreground(th.accent).Bold(true).Render("▌")
+	title := titleSt.Render(accBar + " ◈ System Health")
 
 	type pill struct{ name, val string }
 	pills := []pill{
@@ -1009,14 +1027,15 @@ func (m Model) renderHealthCard(th theme, w int) string {
 
 	cardSt := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("238")).
+		BorderForeground(lipgloss.Color("236")).
 		Width(w)
 
 	if m.ActivePanel == PanelStatus {
 		cardSt = cardSt.BorderForeground(th.accent)
 	}
 
-	inner := strings.Join(append([]string{title, ""}, rows...), "\n")
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("236")).Render(strings.Repeat("╌", w))
+	inner := strings.Join(append([]string{title, sep}, rows...), "\n")
 	return cardSt.Render(inner)
 }
 
@@ -1040,19 +1059,22 @@ func (m Model) renderMailAccountCard(th theme, w, h int) string {
 		Width(w).
 		Padding(0, 1)
 
-	title := titleSt.Render("☁  Mail Account  " + th.mutedStyle.Render("live"))
-	// Estimate available body lines: h minus borders(2) from card + title(1) + sep(1) + blank(1) + blank(1) + hint(1)
-	// lipgloss Height is the inner height, borders are outside that count, so subtract non-body inner lines.
+	accBar := lipgloss.NewStyle().Foreground(th.accent).Bold(true).Render("▌")
+	liveBadge := lipgloss.NewStyle().
+		Foreground(th.success).
+		Bold(true).
+		Render("● LIVE")
+	title := titleSt.Render(accBar + " ☁  Mail Account  " + liveBadge)
 	bodyH := h - 5
 	if bodyH < 1 {
 		bodyH = 1
 	}
 	body := m.mailAccountPanelView(w, bodyH)
-	hint := th.mutedStyle.Render("  [ prev  ] next domain  n new  e toggle  d del  r refresh  ↑↓ nav")
+	hint := th.mutedStyle.Render("  [/] domain  n new  e toggle  d del  ↑↓ nav")
 
 	cardSt := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("238")).
+		BorderForeground(lipgloss.Color("236")).
 		Width(w).
 		Height(h)
 
@@ -1060,7 +1082,7 @@ func (m Model) renderMailAccountCard(th theme, w, h int) string {
 		cardSt = cardSt.BorderForeground(th.accent)
 	}
 
-	sep := th.mutedStyle.Render(strings.Repeat("─", w-2))
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("236")).Render(strings.Repeat("╌", w-2))
 
 	inner := strings.Join([]string{title, sep, "", body, "", hint}, "\n")
 	inner = clampLines(inner, h)
@@ -1074,18 +1096,19 @@ func (m Model) renderSettingsCard(th theme, w, h int) string {
 		Width(w-2).
 		Padding(0, 1)
 
-	title := titleSt.Render("⚙ Settings  " + th.mutedStyle.Render("clipboard"))
+	accBar := lipgloss.NewStyle().Foreground(th.purple).Bold(true).Render("▌")
+	title := titleSt.Render(accBar + " ⚙ Settings  " + th.mutedStyle.Render("configuration"))
 	sepW := w - 4
 	if sepW < 1 {
 		sepW = 1
 	}
-	sep := th.mutedStyle.Render(strings.Repeat("─", sepW))
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("236")).Render(strings.Repeat("╌", sepW))
 	body := m.settingsPanelView(w - 4)
-	hint := th.mutedStyle.Render("  ↑↓ nav  space toggle  enter save+apply  r reset")
+	hint := th.mutedStyle.Render("  ↑↓ nav  space toggle  enter save  r reset")
 
 	cardSt := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("238")).
+		BorderForeground(lipgloss.Color("236")).
 		Width(w).
 		Height(h)
 
@@ -1259,9 +1282,10 @@ func (m Model) renderOTPCard(th theme, w, h int) string {
 		Background(th.bgAlt).
 		Width(w-2).
 		Padding(0, 1)
-	title := titleSt.Render("⚡ Latest OTP  " + th.mutedStyle.Render("incoming timeline"))
+	accBar := lipgloss.NewStyle().Foreground(th.cyan).Bold(true).Render("▌")
+	title := titleSt.Render(accBar + " ⚡ Latest OTP  " + th.mutedStyle.Render("incoming timeline"))
 
-	sep := th.mutedStyle.Render(strings.Repeat("─", w-4))
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("236")).Render(strings.Repeat("╌", w-4))
 
 	// Estimate lines available for the timeline: h minus title(1)+sep(1)+blank(1)+blank(1)+detailSep(1)+detailTitle(1)+detail(~4)
 	timelineH := h - 10
@@ -1269,13 +1293,13 @@ func (m Model) renderOTPCard(th theme, w, h int) string {
 		timelineH = 2
 	}
 	timeline := m.otpTimelineView(w-4, timelineH)
-	detailSep := th.mutedStyle.Render(strings.Repeat("─", w-4))
+	detailSep := lipgloss.NewStyle().Foreground(lipgloss.Color("236")).Render(strings.Repeat("╌", w-4))
 	detailTitle := th.purpleStyle.Copy().Bold(true).Render("◈ Selected Detail")
 	detail := m.otpDetailView()
 
 	cardSt := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("238")).
+		BorderForeground(lipgloss.Color("236")).
 		Width(w).
 		Height(h)
 
@@ -1290,8 +1314,6 @@ func (m Model) renderOTPCard(th theme, w, h int) string {
 		detail,
 	}, "\n")
 
-	// Clamp inner content to the allotted height so the card
-	// doesn't overflow (lipgloss Height is a minimum, not a max).
 	inner = clampLines(inner, h)
 
 	return cardSt.Render(inner)
@@ -1304,17 +1326,23 @@ func (m Model) renderLogsCard(th theme, w, h int) string {
 		Width(w-2).
 		Padding(0, 1)
 
-	scrollIndicator := th.mutedStyle.Render("auto ▼")
+	accBar := lipgloss.NewStyle().Foreground(th.success).Bold(true).Render("▌")
+	scrollIndicator := lipgloss.NewStyle().
+		Foreground(th.success).
+		Bold(true).
+		Render("▼ LIVE")
 	if m.logScroll > 0 {
-		scrollIndicator = th.mutedStyle.Render(fmt.Sprintf("↑%d", m.logScroll))
+		scrollIndicator = lipgloss.NewStyle().
+			Foreground(th.warning).
+			Render(fmt.Sprintf("↑%d", m.logScroll))
 	}
-	title := titleSt.Render("≡ Logs  " + th.mutedStyle.Render("runtime log stream") + "  " + scrollIndicator)
+	title := titleSt.Render(accBar + " ≡ Logs  " + th.mutedStyle.Render("runtime") + "  " + scrollIndicator)
 
-	sep := th.mutedStyle.Render(strings.Repeat("─", w-4))
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("236")).Render(strings.Repeat("╌", w-4))
 
 	cardSt := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("238")).
+		BorderForeground(lipgloss.Color("236")).
 		Width(w).
 		Height(h)
 
@@ -1323,7 +1351,6 @@ func (m Model) renderLogsCard(th theme, w, h int) string {
 	}
 
 	// Calculate visible lines
-	// h accounts for title + sep + padding, so usable lines for log content
 	usableH := h - 2 // title + separator
 	if usableH < 1 {
 		usableH = 1
@@ -1340,7 +1367,7 @@ func (m Model) renderLogsCard(th theme, w, h int) string {
 	}
 
 	// Window into log lines based on scroll position
-	lineW := w - 6 // account for borders + padding
+	lineW := w - 6
 	if lineW < 10 {
 		lineW = 10
 	}
@@ -1387,22 +1414,36 @@ func (m Model) renderFooter(th theme, totalW int) string {
 
 	kSt := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(th.bg).
-		Background(th.muted).
+		Foreground(lipgloss.Color("233")).
+		Background(th.accent).
 		Padding(0, 1)
-	dSt := th.mutedStyle
+	dSt := lipgloss.NewStyle().Foreground(lipgloss.Color("248"))
+	dotSt := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 
 	parts := make([]string, 0, len(keys))
-	for _, kv := range keys {
+	for i, kv := range keys {
+		if i > 0 {
+			parts = append(parts, dotSt.Render("·"))
+		}
 		parts = append(parts, kSt.Render(kv.k)+" "+dSt.Render(kv.desc))
 	}
 
-	inner := strings.Join(parts, "  ")
-	return lipgloss.NewStyle().
+	inner := strings.Join(parts, " ")
+
+	// Thin top separator
+	sepLine := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("236")).
+		Background(th.bgAlt).
+		Width(totalW).
+		Render(strings.Repeat("─", totalW))
+
+	footerLine := lipgloss.NewStyle().
 		Background(th.bgAlt).
 		Padding(0, 1).
 		Width(totalW).
 		Render(inner)
+
+	return strings.Join([]string{sepLine, footerLine}, "\n")
 }
 
 // renderToast renders the toast notification bar.
@@ -1416,40 +1457,40 @@ func (m Model) renderToast(th theme, totalW int) string {
 
 	switch m.toast.Level {
 	case ToastSuccess:
-		icon = "✔"
+		icon = " ✔ "
 		style = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(th.success).
-			Background(lipgloss.Color("22")) // dark green bg
+			Background(lipgloss.Color("22"))
 	case ToastError:
-		icon = "✖"
+		icon = " ✖ "
 		style = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(th.danger).
-			Background(lipgloss.Color("52")) // dark red bg
+			Background(lipgloss.Color("52"))
 	case ToastWarning:
-		icon = "⚠"
+		icon = " ⚠ "
 		style = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(th.warning).
-			Background(lipgloss.Color("58")) // dark yellow bg
+			Background(lipgloss.Color("58"))
 	case ToastInfo:
-		icon = "ℹ"
+		icon = " ℹ "
 		style = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(th.accent).
-			Background(lipgloss.Color("17")) // dark blue bg
+			Background(lipgloss.Color("17"))
 	}
 
-	msg := truncate(m.toast.Message, totalW-10)
-	left := fmt.Sprintf(" %s  %s", icon, msg)
+	msg := truncate(m.toast.Message, totalW-14)
+	left := fmt.Sprintf("%s %s", icon, msg)
 
 	remaining := toastDuration(m.toast.Level) - time.Since(m.toast.ShownAt)
 	secs := int(remaining.Seconds())
 	if secs < 0 {
 		secs = 0
 	}
-	countdown := fmt.Sprintf("(%ds)", secs)
+	countdown := fmt.Sprintf("[%ds]", secs)
 
 	gap := totalW - lipgloss.Width(left) - lipgloss.Width(countdown) - 1
 	if gap < 1 {
@@ -1478,29 +1519,39 @@ func (m Model) renderHelp(th theme) string {
 		return kSt.Render(fmt.Sprintf("%-14s", k)) + dSt.Render(d)
 	}
 
+	headerLine := th.purpleStyle.Render(strings.Repeat("─", 40))
+
 	rows := []string{
-		th.bold.Render("Keyboard Shortcuts"),
+		th.bold.Render("⌨  Keyboard Shortcuts"),
+		headerLine,
 		"",
+		th.purpleStyle.Bold(true).Render("Navigation"),
 		col("q / ctrl+c", "quit application"),
 		col("?", "toggle this help"),
-		col("r", "refresh all data"),
 		col("tab", "cycle panels"),
 		col("o", "jump to OTP panel"),
 		col("l", "jump to Logs panel"),
 		col("s", "jump to Settings panel"),
+		col("↑↓ / j k", "navigate items"),
+		col("esc", "cancel / clear / back"),
+		"",
+		th.cyanStyle.Copy().Bold(true).Render("OTP"),
+		col("r", "refresh all data"),
 		col("/", "search OTP events"),
-		col("G", "jump to bottom (logs)"),
-		col("space", "toggle setting value"),
-		col("enter", "save+apply settings"),
 		col("c", "copy selected OTP"),
 		col("x", "clear selected OTP"),
-		col("X", "clear OTP by current filter"),
+		col("X", "clear by current filter"),
 		col("C", "clear all OTP"),
-		col("n", "new mail account (routing rule)"),
+		"",
+		th.accentStyle.Render("Mail Account"),
+		col("n", "new mail account"),
 		col("d", "delete mail account"),
-		col("e", "toggle mail account enable/disable"),
-		col("↑↓ / j k", "navigate items"),
-		col("esc", "cancel / clear filter / back"),
+		col("e", "toggle enable/disable"),
+		"",
+		th.purpleStyle.Copy().Bold(true).Render("Settings"),
+		col("space", "toggle setting value"),
+		col("enter", "save and apply"),
+		col("G", "jump to bottom (logs)"),
 	}
 
 	return helpSt.Render(strings.Join(rows, "\n"))
@@ -1552,7 +1603,7 @@ func (m Model) otpTimelineView(w, h int) string {
 	header := hdrSt.Render(fmt.Sprintf("   %-3s  %-12s  %-8s  %-*s  %s",
 		"#", "PLATFORM", "OTP", aliasW, "ALIAS", "TIME",
 	))
-	sep := th.mutedStyle.Render("  " + strings.Repeat("─", sepW))
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("236")).Render("  " + strings.Repeat("╌", sepW))
 
 	lines := make([]string, 0, h+6)
 	prefix := []string{}
@@ -1593,8 +1644,10 @@ func (m Model) otpTimelineView(w, h int) string {
 		cursor := "   "
 
 		if globalIdx == m.otpSelected {
-			cursor = th.accentStyle.Render(" ▶ ")
+			cursor = th.cyanStyle.Copy().Bold(true).Render(" ▶ ")
 			otpSt = lipgloss.NewStyle().Bold(true).Foreground(th.warning)
+			platSt = lipgloss.NewStyle().Bold(true).Foreground(th.cyan)
+			aliasSt = lipgloss.NewStyle().Foreground(th.fg)
 		}
 
 		line := fmt.Sprintf("%s%s  %s  %s  %s  %s",
@@ -1610,10 +1663,10 @@ func (m Model) otpTimelineView(w, h int) string {
 
 	// Scroll indicator when not at top/bottom.
 	if start > 0 {
-		lines = append([]string{th.mutedStyle.Render(fmt.Sprintf("  ↑ %d more above", start))}, lines...)
+		lines = append([]string{th.mutedStyle.Render(fmt.Sprintf("  ▲ %d more above", start))}, lines...)
 	}
 	if end < len(m.otpEvents) {
-		lines = append(lines, th.mutedStyle.Render(fmt.Sprintf("  ↓ %d more below", len(m.otpEvents)-end)))
+		lines = append(lines, th.mutedStyle.Render(fmt.Sprintf("  ▼ %d more below", len(m.otpEvents)-end)))
 	}
 
 	lines = append(prefix, lines...)
@@ -1630,7 +1683,7 @@ func (m Model) otpTimelineView(w, h int) string {
 	}
 
 	lines = append(lines, sep)
-	lines = append(lines, th.mutedStyle.Render("  ↑↓/jk nav  ·  c copy  ·  x/X/C clear  ·  / search  ·  esc clear"))
+	lines = append(lines, th.mutedStyle.Render("  ↑↓/jk nav · c copy · x/X/C clear · / search · esc clear"))
 
 	return strings.Join(lines, "\n")
 }
@@ -1652,9 +1705,9 @@ func (m Model) otpDetailView() string {
 	valueStyle := lipgloss.NewStyle().Foreground(th.fg)
 	otpBig := lipgloss.NewStyle().
 		Bold(true).
-		Foreground(th.warning).
-		Background(lipgloss.Color("236")).
-		Padding(0, 2).
+		Foreground(lipgloss.Color("233")).
+		Background(th.cyan).
+		Padding(0, 3).
 		Render(e.OTPCode)
 
 	rows := []string{
@@ -1663,10 +1716,10 @@ func (m Model) otpDetailView() string {
 			otpBig,
 		),
 		"",
-		labelStyle.Render("  platform  ") + valueStyle.Render(e.Platform),
-		labelStyle.Render("  alias     ") + valueStyle.Render(e.AliasEmail),
-		labelStyle.Render("  from      ") + valueStyle.Render(e.FromEmail),
-		labelStyle.Render("  received  ") + th.purpleStyle.Render(e.ReceivedAt.UTC().Format(time.RFC3339)),
+		labelStyle.Render("  platform │ ") + valueStyle.Render(e.Platform),
+		labelStyle.Render("  alias    │ ") + valueStyle.Render(e.AliasEmail),
+		labelStyle.Render("  from     │ ") + valueStyle.Render(e.FromEmail),
+		labelStyle.Render("  received │ ") + th.purpleStyle.Render(e.ReceivedAt.UTC().Format(time.RFC3339)),
 		"",
 		th.mutedStyle.Render("  press ") +
 			th.accentStyle.Render("c") +
@@ -2913,18 +2966,18 @@ func formatLogLine(raw string, th theme, maxW int) string {
 		ts = t.Format("15:04:05")
 	}
 
-	// Colorize level
+	// Colorize level with background badges
 	var levelStr string
 	switch strings.ToLower(entry.Level) {
 	case "error":
-		levelStr = th.errStyle.Render("ERR")
+		levelStr = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255")).Background(lipgloss.Color("160")).Render(" ERR ")
 	case "warn":
-		levelStr = th.warnStyle.Render("WRN")
+		levelStr = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("233")).Background(th.warning).Render(" WRN ")
 	default:
-		levelStr = th.successStyle.Render("INF")
+		levelStr = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("233")).Background(th.success).Render(" INF ")
 	}
 
-	tsStr := th.purpleStyle.Render(ts)
+	tsStr := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(ts)
 	eventStr := th.accentStyle.Copy().Bold(false).Render(truncate(entry.Event, 30))
 	msgW := maxW - 50
 	if msgW < 10 {
