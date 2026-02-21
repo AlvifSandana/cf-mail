@@ -434,6 +434,33 @@ func (m runtimeSettingsManager) SaveAndApply(_ context.Context, state ui.Setting
 	}, clip, nil
 }
 
+func (m runtimeSettingsManager) PersistActiveDomain(_ context.Context, domain string) error {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return fmt.Errorf("domain is required")
+	}
+
+	cfg, err := config.Load(m.configPath)
+	if err != nil {
+		return err
+	}
+
+	cfg.Cloudflare.ActiveDomain = domain
+
+	// Preserve env-backed secrets
+	if strings.TrimSpace(cfg.Cloudflare.APITokenEnv) != "" {
+		cfg.Cloudflare.APIToken = ""
+	}
+	if strings.TrimSpace(cfg.Mailbox.IMAP.PasswordEnv) != "" {
+		cfg.Mailbox.IMAP.Password = ""
+	}
+
+	if err := config.Save(m.configPath, cfg); err != nil {
+		return err
+	}
+	return nil
+}
+
 func parseSettingsDomains(v string) ([]config.CloudflareDomain, error) {
 	normalized := strings.TrimSpace(v)
 	lines := strings.FieldsFunc(normalized, func(r rune) bool {

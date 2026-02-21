@@ -78,6 +78,10 @@ func (f *fakeSettingsManager) SaveAndApply(_ context.Context, state SettingsStat
 	return f.saveState, f.saveClipboard, nil
 }
 
+func (f *fakeSettingsManager) PersistActiveDomain(_ context.Context, _ string) error {
+	return nil
+}
+
 func (f *fakeOTPManager) ListOTPEvents(_ context.Context, filter app.OTPListFilter) ([]domain.OTPEvent, error) {
 	f.calls++
 	f.lastQuery = filter.Query

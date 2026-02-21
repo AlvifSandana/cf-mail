@@ -142,6 +142,7 @@ type SettingsState struct {
 type settingsManager interface {
 	Load(ctx context.Context) (SettingsState, error)
 	SaveAndApply(ctx context.Context, state SettingsState) (SettingsState, clipboardCopier, error)
+	PersistActiveDomain(ctx context.Context, domain string) error
 }
 
 type clipboardCopier = ports.Clipboard
@@ -799,6 +800,14 @@ func (m Model) renderTopBar(th theme, totalW int) string {
 	brand := "⚡ TUIOTP"
 	tagline := "OTP Dashboard · Cloudflare Email · IMAP"
 
+	// Active domain indicator
+	domainTag := ""
+	if m.rulesManager != nil {
+		if active := strings.TrimSpace(m.rulesManager.ActiveDomain()); active != "" {
+			domainTag = " @" + active
+		}
+	}
+
 	now := time.Now().UTC().Format("15:04:05 UTC")
 	clock := lipgloss.NewStyle().
 		Foreground(th.accent).
@@ -810,8 +819,13 @@ func (m Model) renderTopBar(th theme, totalW int) string {
 			Render(now)
 	}
 
+	domainIndicator := ""
+	if domainTag != "" {
+		domainIndicator = lipgloss.NewStyle().Foreground(th.accent).Bold(true).Render(domainTag)
+	}
+
 	logoText := brand + "  " + tagline
-	maxLogoW := totalW - lipgloss.Width(clock) - 3
+	maxLogoW := totalW - lipgloss.Width(clock) - lipgloss.Width(domainIndicator) - 4
 	if maxLogoW < 8 {
 		maxLogoW = 8
 	}
@@ -827,7 +841,7 @@ func (m Model) renderTopBar(th theme, totalW int) string {
 	}
 
 	// Push clock to right
-	logoW := lipgloss.Width(logo)
+	logoW := lipgloss.Width(logo) + lipgloss.Width(domainIndicator)
 	clockW := lipgloss.Width(clock)
 	gap := totalW - logoW - clockW - 2
 	if gap < 1 {
@@ -836,7 +850,7 @@ func (m Model) renderTopBar(th theme, totalW int) string {
 	topLine := lipgloss.NewStyle().
 		Background(th.bgAlt).
 		Width(totalW).
-		Render(logo + strings.Repeat(" ", gap) + clock)
+		Render(logo + domainIndicator + strings.Repeat(" ", gap) + clock)
 
 	// Tab bar
 	tabBar := m.renderTabBar(th, totalW)
@@ -1026,7 +1040,7 @@ func (m Model) renderMailAccountCard(th theme, w, h int) string {
 
 	title := titleSt.Render("☁  Mail Account  " + th.mutedStyle.Render("live"))
 	body := m.mailAccountPanelView(w)
-	hint := th.mutedStyle.Render("  [/] domain  n new  e toggle  d del  r refresh  ↑↓ nav")
+	hint := th.mutedStyle.Render("  [ prev  ] next domain  n new  e toggle  d del  r refresh  ↑↓ nav")
 
 	cardSt := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -2047,7 +2061,14 @@ func (m Model) updateMailAccountPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 			toastCmd := showToast(&m, ToastError, userSafeError("switch active domain", err))
 			return m, toastCmd, true
 		}
-		toastCmd := showToast(&m, ToastInfo, "active domain: "+domains[next])
+		if m.settingsMgr != nil {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_ = m.settingsMgr.PersistActiveDomain(ctx, domains[next])
+			}()
+		}
+		toastCmd := showToast(&m, ToastSuccess, "✓ active domain: "+domains[next])
 		return m, tea.Batch(toastCmd, m.refreshCFRulesCmd()), true
 	case "]":
 		if m.rulesManager == nil {
@@ -2070,7 +2091,14 @@ func (m Model) updateMailAccountPanel(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 			toastCmd := showToast(&m, ToastError, userSafeError("switch active domain", err))
 			return m, toastCmd, true
 		}
-		toastCmd := showToast(&m, ToastInfo, "active domain: "+domains[next])
+		if m.settingsMgr != nil {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_ = m.settingsMgr.PersistActiveDomain(ctx, domains[next])
+			}()
+		}
+		toastCmd := showToast(&m, ToastSuccess, "✓ active domain: "+domains[next])
 		return m, tea.Batch(toastCmd, m.refreshCFRulesCmd()), true
 	case "n":
 		if m.rulesManager == nil {

@@ -19,7 +19,7 @@ func Validate(cfg *Config) error {
 		if tokenEnv == "" {
 			return fmt.Errorf("cloudflare.api_token or cloudflare.api_token_env is required")
 		}
-		return fmt.Errorf("cloudflare api token is empty or not set")
+		return fmt.Errorf("cloudflare api token is empty (env var %q not set or empty)", tokenEnv)
 	}
 	if cfg.Destination.RequireVerified && strings.TrimSpace(cfg.Cloudflare.AccountID) == "" {
 		return fmt.Errorf("cloudflare.account_id is required when destination.require_verified=true")
